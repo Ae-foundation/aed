@@ -171,8 +171,11 @@ parse(char *s, size_t cur, size_t end, edcom *out)
 
 	while (!isalpha(*sp) && *sp != '!' && *sp != '\'' && *sp != '=' && *sp)
 		sp++;
-	if (*sp) /* parse command */
+	if (*sp) { /* parse command */
 		out->c = *sp;
+		if (*(sp + 1)) /* parse argument */
+			snprintf(out->arg, sizeof(out->arg), "%s", sp + 1);
+	}
 
 	if ((n = sp - s)) { /* parse range */
 		if (*s == ',' || *s == ';') {
@@ -217,9 +220,6 @@ parse(char *s, size_t cur, size_t end, edcom *out)
 			}
 		}
 	}
-
-	if (*++sp) /* parse argument */
-		snprintf(out->arg, sizeof(out->arg), "%s", sp);
 
 	return 1;
 }
