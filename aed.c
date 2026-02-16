@@ -28,7 +28,7 @@
 
 typedef struct __edcom {
 	ssize_t x, y;	/* range */
-	uint8_t c;	/* command */
+	char c;	/* command */
 	char arg[4096]; /* argument */
 } edcom;
 
@@ -169,7 +169,7 @@ parse(char *s, size_t cur, size_t end, edcom *out)
 	unsigned long long n, j;
 	char *sp = s, *endp;
 
-	while (!isalpha(*sp) && *sp != '!' && *sp != '\'' && *sp != '=' && *sp)
+	while (!isalpha((uint8_t)*sp) && *sp != '!' && *sp != '\'' && *sp != '=' && *sp)
 		sp++;
 	if (*sp) { /* parse command */
 		out->c = *sp;
@@ -204,7 +204,7 @@ parse(char *s, size_t cur, size_t end, edcom *out)
 			out->y = out->x = (size_t)n;
 			if (*endp == ',' || *endp == ';') {
 				s = endp + 1;
-				if (isdigit(*s)) {
+				if (isdigit((uint8_t)*s)) {
 					if (*s == '-')
 						return 0;
 					errno = 0;
