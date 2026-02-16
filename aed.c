@@ -132,31 +132,28 @@ static inline char *
 expr(char *s, unsigned long long *n)
 {
 	unsigned long long tmp;
-	char *endp = s;
-	bool fail = 0;
+	char *endp = s, c;
 
 	while (*endp == '+' || *endp == '-') {
-		s = ++endp;
+		c = *endp++;
+		s = endp;
+
 		if (!isdigit((uint8_t)*s)) {
 			tmp = 1;
 		} else {
 			errno = 0;
 			tmp = strtoull(s, &endp, 10);
 			if (errno != 0 || s == endp || tmp > SIZE_MAX)
-				fail = 1;
+				return NULL;
 		}
-		if (fail)
-			continue;
-		if (s[-1] == '+') {
+		if (c == '+') {
 			if (SIZE_MAX - *n < tmp)
-				fail = 1;
-			else
-				*n += tmp;
+				return NULL;
+			*n += tmp;
 		} else {
 			if (*n < tmp)
-				fail = 1;
-			else
-				*n -= tmp;
+				return NULL;
+			*n -= tmp;
 		}
 	}
 
@@ -188,7 +185,8 @@ parse(char *s, size_t cur, size_t end, edcom *out)
 				n = strtoull(s, &endp, 10);
 				if (errno != 0 || s == endp || n > SIZE_MAX)
 					return 0;
-				expr(endp, &n);
+				if (!expr(endp, &n))
+					return 0;
 				out->y = (size_t)n;
 			}
 		} else {
@@ -198,7 +196,8 @@ parse(char *s, size_t cur, size_t end, edcom *out)
 			n = strtoull(s, &endp, 10);
 			if (errno != 0 || s == endp || n > SIZE_MAX)
 				return 0;
-			endp = expr(endp, &n);
+			if (!(endp = expr(endp, &n)))
+				return NULL;
 			out->y = out->x = (size_t)n;
 			if (*endp == ',' || *endp == ';') {
 				s = endp + 1;
@@ -210,7 +209,8 @@ parse(char *s, size_t cur, size_t end, edcom *out)
 					if (errno != 0 || j > SIZE_MAX)
 						return 0;
 					if (s != endp) {
-						expr(endp, &j);
+						if (!expr(endp, &j))
+							return 0;
 						out->y = (size_t)j;
 					}
 				}
