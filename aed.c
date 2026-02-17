@@ -150,8 +150,7 @@ parse(char *s, size_t cur, size_t end, edcom *out)
 		if (*s == ',' || *s == ';') {
 			out->x = (*s == ';') ? cur : 1;
 			out->y = end;
-
-			if (n > 1) { /* for y */
+			if (n > 1) {
 				++s;
 				if (*s == '$' || *s == '.') {
 					n = (*s == '.') ? cur : end;
@@ -170,7 +169,7 @@ parse(char *s, size_t cur, size_t end, edcom *out)
 				out->y = (size_t)n;
 			}
 		} else {
-			if (*s == '$' || *s == '.') { /* for x */
+			if (*s == '$' || *s == '.') {
 				n = (*s == '.') ? cur : end;
 				endp = s + 1;
 			} else {
@@ -184,8 +183,7 @@ parse(char *s, size_t cur, size_t end, edcom *out)
 			if (!(endp = expr(endp, &n, cur, end)))
 				return NULL;
 			out->y = out->x = (size_t)n;
-
-			if (*endp == ',' || *endp == ';') { /* for y */
+			if (*endp == ',' || *endp == ';') {
 				s = endp + 1;
 				if (*s == '$' || *s == '.' ||
 				    isdigit((uint8_t)*s)) {
