@@ -14,6 +14,8 @@
  * OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+#include <sys/time.h>
+
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -24,6 +26,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 typedef struct __edcom {
@@ -32,16 +35,17 @@ typedef struct __edcom {
 	char arg[4096]; /* argument */
 } edcom;
 
-static size_t curl;	     /* current line */
-static size_t endl;	     /* end line (last) */
-static bool change;	     /* change flag */
-static char lastfile[65535]; /* last edit file */
-static size_t marks[26];     /*marks */
-static char templ[256];	     /* template main temp file */
-static char utempl[256];     /* template undo temp file */
-static size_t uendl;	     /* undo end line (last) */
-static int fd = -1;	     /* main temp file */
-static int ufd = -1;	     /* undo temp file */
+static size_t curl;	    /* current line */
+static size_t endl;	    /* end line (last) */
+static bool change;	    /* change flag */
+static char lastfile[4096]; /* last edit file */
+static size_t marks[26];    /*marks */
+static char templ[256];	    /* template main temp file */
+static char utempl[256];    /* template undo temp file */
+static size_t uendl;	    /* undo end line (last) */
+static int fd = -1;	    /* main temp file */
+static int ufd = -1;	    /* undo temp file */
+static struct timeval tv;   /* for timestamp */
 
 inline static void
 tmpclose(int *fd, char *templ)
@@ -70,23 +74,21 @@ savefile(void)
 			return tmpclose(&ufd, utempl);
 }
 
-inline static void
+static void
 undo(void)
 {
 	if (ufd < 0)
 		return;
-
-	int save = fd;
+	char save2[sizeof(templ)];
 	size_t save1 = endl;
-	char save3[sizeof(templ)];
-	strcpy(save3, templ);
-
+	int save = fd;
+	strcpy(save2, templ);
 	fd = ufd;
 	ufd = save;
 	endl = uendl;
 	uendl = save1;
 	strcpy(templ, utempl);
-	strcpy(utempl, save3);
+	strcpy(utempl, save2);
 }
 
 static inline char *
@@ -144,7 +146,6 @@ parse(char *s, size_t cur, size_t end, edcom *out)
 		if (*(sp + 1)) /* parse argument */
 			snprintf(out->arg, sizeof(out->arg), "%s", sp + 1);
 	}
-
 	n = sp - s;
 	if (n) { /* parse range */
 		if (*s == ',' || *s == ';') {
@@ -210,30 +211,31 @@ parse(char *s, size_t cur, size_t end, edcom *out)
 	return 1;
 }
 
-inline static void
+static void
 quit(int sig)
 {
 	(void)sig;
+	struct timeval tv1, res;
 	tmpclose(&fd, templ);
 	tmpclose(&ufd, utempl);
-	puts("AExit");
+	gettimeofday(&tv1, NULL);
+	timersub(&tv1, &tv, &res);
+	printf("AExit: %ld sec\n", res.tv_sec);
 	exit(0);
 }
 
 static bool
-edit(edcom *com)
+edit(edcom *c)
 {
 	char buf[65535];
 	ssize_t n, tot = 0;
 	int tmpfd;
 
-	if (change)
-		return (change = 0);
-	if (!*lastfile) {
-		if (!com || !strlen(com->arg + 1))
+	if (!c || !*c->arg || !c->arg[1]) {
+		if (!*lastfile)
 			return 0;
-		snprintf(lastfile, sizeof(lastfile), "%s", com->arg + 1);
-	}
+	} else
+		snprintf(lastfile, sizeof(lastfile), "%s", c->arg + 1);
 
 	tmpclose(&fd, templ);
 	endl = 0;
@@ -257,22 +259,19 @@ edit(edcom *com)
 }
 
 static bool
-print(edcom *com, bool number, bool list)
+print(edcom *c, bool number, bool list)
 {
 	ssize_t n, i, k, off, cur = 0;
 	char buf[65535];
 	bool flag = 0;
 
-	if (fd < 0 || com->y > endl || com->x > endl || com->x > com->y ||
-	    com->x <= 0 || com->y <= 0)
-		return 0;
 	lseek(fd, 0, SEEK_SET);
 	while ((n = read(fd, buf, sizeof(buf)))) {
 		for (i = off = 0; i < n; i++) {
 			if (buf[i] != '\n')
 				continue;
 			++cur;
-			if (cur == com->x)
+			if (cur == c->x)
 				flag = 1;
 			if (flag) {
 				buf[i] = 0;
@@ -317,28 +316,120 @@ print(edcom *com, bool number, bool list)
 					}
 				}
 			}
-			if (cur == com->y)
+			if (cur == c->y)
 				goto ret;
 			off = i + 1;
 		}
 	}
 ret:
-	curl = com->y;
+	curl = c->y;
 	return 1;
 }
 
-static bool delete(edcom *com)
+static bool
+readfile(edcom *c, bool slient, bool save)
 {
-	char ntempl[] = "/tmp/aeddeleteXXXXXX";
-	ssize_t n, i, tot = 0, off, cur = 0;
-	char buf[65535];
-	int tmpfd;
+	char ntempl[] = "/tmp/aedreadXXXXXX";
+	ssize_t n, i, k, tot = 0, off, cur = 0, l = 0;
+	char buf[65535], buf1[65535];
+	;
+	int ifd, tmpfd;
+	bool flag = 0;
 
-	if (fd < 0 || com->y > endl || com->x > endl || com->x > com->y ||
-	    com->x <= 0 || com->y <= 0)
+	if (!*c->arg || !c->arg[1]) {
+		if (!*lastfile)
+			return 0;
+	} else
+		snprintf(lastfile, sizeof(lastfile), "%s", c->arg + 1);
+	if (save)
+		savefile();
+	if ((ifd = open(lastfile, O_RDONLY)) < 0)
+		return 0;
+	if ((tmpfd = mkstemp(ntempl)) < 0)
+		return 0;
+	if (!c->x) {
+		while ((n = read(ifd, buf, sizeof(buf)))) {
+			if (write(tmpfd, buf, n) != n)
+				goto err;
+			tot += n;
+			while (n--)
+				if (buf[n] == '\n')
+					++l;
+		}
+		flag = 1;
+	}
+	lseek(fd, 0, SEEK_SET);
+	while ((n = read(fd, buf, sizeof(buf)))) {
+		off = 0;
+		for (i = 0; !flag && i < n; i++) {
+			if (buf[i] != '\n')
+				continue;
+			if (++cur != c->x)
+				continue;
+			off = i + 1;
+			if (write(tmpfd, buf, off) != off)
+				goto err;
+			while ((k = read(ifd, buf1, sizeof(buf1)))) {
+				if (write(tmpfd, buf1, k) != k)
+					goto err;
+				tot += k;
+				while (k--)
+					if (buf1[k] == '\n')
+						++l;
+			}
+			flag = 1;
+			break;
+		}
+		if (n > off)
+			if (write(tmpfd, buf + off, n - off) != (n - off))
+				goto err;
+	}
+	if (!flag && c->x == endl) {
+		while ((n = read(ifd, buf, sizeof(buf)))) {
+			if (write(tmpfd, buf, n) != n)
+				goto err;
+			tot += n;
+			while (n--)
+				if (buf[n] == '\n')
+					++l;
+		}
+	}
+
+	close(ifd);
+	tmpclose(&fd, templ);
+	rename(ntempl, templ);
+	fd = tmpfd;
+	change = 1;
+	curl = c->x + l;
+	endl += l;
+
+	if (!slient)
+		printf("Read: %zu [%zu lines]\n", tot, l);
+	return 1;
+
+err:
+	close(ifd);
+	close(tmpfd);
+	unlink(ntempl);
+	return 0;
+}
+
+static bool
+transfer(edcom *c, bool save)
+{
+	char ntempl[] = "/tmp/aedtransferXXXXXX";
+	ssize_t n, i, off, cur = 0;
+	unsigned long long post;
+	char buf[65535], *endp;
+	int tmpfd;
+	edcom tmp = { 0 };
+
+	errno = 0;
+	post = strtoull(c->arg, &endp, 10);
+	if (*c->arg == '-' || errno != 0 || endp == c->arg || post > SIZE_MAX ||
+	    post > endl)
 		return 0;
 
-	savefile();
 	if ((tmpfd = mkstemp(ntempl)) < 0)
 		return 0;
 	lseek(fd, 0, SEEK_SET);
@@ -347,7 +438,48 @@ static bool delete(edcom *com)
 			if (buf[i] != '\n')
 				continue;
 			++cur;
-			if ((cur < com->x || cur > com->y)) {
+			if (cur >= c->x) {
+				if ((write(tmpfd, buf + off, i - off + 1)) <
+				    0) {
+					close(tmpfd);
+					return 0;
+				}
+			}
+			if (cur == c->y)
+				goto ret;
+			off = i + 1;
+		}
+	}
+
+ret:
+	tmp.x = tmp.y = post;
+	snprintf(buf, sizeof(buf), "%s", lastfile);
+	snprintf(lastfile, sizeof(lastfile), "%s", ntempl);
+	readfile(&tmp, 1, save);
+	snprintf(lastfile, sizeof(lastfile), "%s", buf);
+	tmpclose(&tmpfd, ntempl);
+	return 1;
+}
+
+static bool delete(edcom *c, bool save)
+{
+	char ntempl[] = "/tmp/aeddeleteXXXXXX";
+	ssize_t n, i, tot = 0, off, cur = 0;
+	char buf[65535];
+	int tmpfd;
+
+	if (save)
+		savefile();
+	if ((tmpfd = mkstemp(ntempl)) < 0)
+		return 0;
+
+	lseek(fd, 0, SEEK_SET);
+	while ((n = read(fd, buf, sizeof(buf)))) {
+		for (i = off = 0; i < n; i++) {
+			if (buf[i] != '\n')
+				continue;
+			++cur;
+			if ((cur < c->x || cur > c->y)) {
 				if ((write(tmpfd, buf + off, i - off + 1)) <
 				    0) {
 					close(tmpfd);
@@ -363,7 +495,7 @@ static bool delete(edcom *com)
 	rename(ntempl, templ);
 	fd = tmpfd;
 	endl = tot;
-	curl = com->x;
+	curl = c->x;
 	if (curl > endl)
 		curl = endl;
 	change = 1;
@@ -371,18 +503,40 @@ static bool delete(edcom *com)
 }
 
 static bool
-writefile(edcom *com)
+callunix(edcom *c)
+{
+	char buf[1024];
+	FILE *fp;
+	int ret;
+
+	if (!(fp = popen(c->arg, "r")))
+		return 0;
+	while (fgets(buf, sizeof(buf), fp))
+		fputs(buf, stdout);
+
+	ret = pclose(fp);
+	puts("!");
+	return (ret != -1) ? 1 : 0;
+}
+
+static bool
+move(edcom *c)
+{
+	savefile();
+	if (!transfer(c, 0))
+		return 0;
+	if (!delete (c, 0))
+		return 0;
+	return 1;
+}
+
+static bool
+writefile(edcom *c)
 {
 	ssize_t n, i, k, tot = 0, off, cur = 0;
 	char buf[65535];
 	int tmpfd;
 
-	if (fd < 0)
-		return 0;
-	if (endl > 0 &&
-	    (com->y > endl || com->x > endl || com->x > com->y || com->x <= 0 ||
-		com->y <= 0))
-		return 0;
 	if ((tmpfd = open(lastfile, O_WRONLY | O_CREAT | O_TRUNC, 0644)) < 0)
 		return 0;
 	lseek(fd, 0, SEEK_SET);
@@ -391,7 +545,7 @@ writefile(edcom *com)
 			if (buf[i] != '\n')
 				continue;
 			++cur;
-			if (cur >= com->x) {
+			if (cur >= c->x) {
 				if ((k = write(tmpfd, buf + off, i - off + 1)) <
 				    0) {
 					close(tmpfd);
@@ -399,21 +553,21 @@ writefile(edcom *com)
 				}
 				tot += k;
 			}
-			if (cur == com->y)
+			if (cur == c->y)
 				goto ret;
 			off = i + 1;
 		}
 	}
 ret:
 	printf("Write: %zu [%zu lines]\n", tot,
-	    (endl > 0) ? cur - com->x + 1 : 0);
+	    (endl > 0) ? cur - c->x + 1 : 0);
 	close(tmpfd);
 	change = 0;
 	return 1;
 }
 
 static bool
-join(edcom *com)
+join(edcom *c)
 {
 	char ntempl[] = "/tmp/aedjoinXXXXXX";
 	ssize_t n, i, tot = 0, off, cur = 0;
@@ -421,20 +575,17 @@ join(edcom *com)
 	bool flag = 0;
 	int tmpfd;
 
-	if (fd < 0 || com->y > endl || com->x > endl || com->x > com->y ||
-	    com->x <= 0 || com->y <= 0)
-		return 0;
-
 	savefile();
 	if ((tmpfd = mkstemp(ntempl)) < 0)
 		return 0;
+
 	lseek(fd, 0, SEEK_SET);
 	while ((n = read(fd, buf, sizeof(buf)))) {
 		for (i = off = 0; i < n; i++) {
 			if (buf[i] != '\n')
 				continue;
 			++cur;
-			if ((flag = (cur < com->x || cur + 1 > com->y)))
+			if ((flag = (cur < c->x || cur + 1 > c->y)))
 				++tot;
 			if ((write(tmpfd, buf + off, i - off + flag)) < 0) {
 				close(tmpfd);
@@ -448,83 +599,135 @@ join(edcom *com)
 	rename(ntempl, templ);
 	fd = tmpfd;
 	endl = tot;
-	curl = com->x;
+	curl = c->x;
 	change = 1;
 	return 1;
 }
 
-static void
-setdefault(edcom *com)
-{
-	if (com->x != -1 && com->y != -1)
-		return;
-	switch (com->c) {
-	case 'p':
-	case 'n':
-	case 'l':
-	case 'd':
-	case 'k':
-	case 'm':
-	case 't':
-		com->x = com->y = curl;
-		break;
-	case 'r':
-	case '=':
-		com->x = com->y = endl;
-		break;
-	case 'j':
-		com->x = curl;
-		com->y = curl + 1;
-	case 'w':
-		com->x = 1;
-		com->y = endl;
-		break;
-	}
-}
-
 static bool
-exec(edcom *com)
+validate(edcom *c)
 {
-	switch (com->c) {
+	if (c->x == -1 && c->y == -1) {
+		switch (c->c) {
+		case 'p':
+		case 'n':
+		case 'l':
+		case 'd':
+		case 'k':
+		case 'm':
+		case 't':
+			c->x = c->y = curl;
+			break;
+		case 'r':
+		case '=':
+			c->x = c->y = endl;
+			break;
+		case 'j':
+			c->x = curl;
+			c->y = curl + 1;
+		case 'w':
+			c->x = 1;
+			c->y = endl;
+			break;
+		}
+	}
+	switch (c->c) {
+	case 'Q':
+	case 'E':
+	case 'u':
+		/* NONE */
+		break;
+	case '!':
+		if (!*c->arg)
+			return 0;
+		break;
+	case 'e':
 	case 'q':
 		if (change)
 			return (change = 0);
+		break;
+
+	case 'f':
+		if (!*lastfile)
+			return 0;
+		break;
+	case 'p':
+	case 'n':
+	case 'l':
+	case 't':
+	case 'j':
+	case 'd':
+	case 'm':
+	case 'w':
+		if (fd < 0 || c->y > endl || c->x > endl || c->x > c->y ||
+		    c->x <= 0 || c->y <= 0)
+			return 0;
+		if (c->c == 'w' && endl <= 0)
+			return 0;
+		break;
+	case 'r':
+		if (fd < 0 || c->x > endl || c->x < 0)
+			return 0;
+		break;
+	case '=':
+		if (c->x > endl || c->x <= 0)
+			return 0;
+		break;
+	case 'k':
+	case '\'':
+		if (!isalpha((uint8_t)*c->arg))
+			return 0;
+		break;
+	}
+	return 1;
+}
+
+static bool
+command(edcom *c)
+{
+	switch (c->c) {
+	case 'q':
 		quit(0);
 	case 'Q':
 		change = 0;
 		quit(0);
+	case '!':
+		return callunix(c);
 	case '\'':
-		if (!isalpha((uint8_t)*com->arg))
-			return 0;
-		com->x = com->y = marks[tolower(*com->arg) - 'a'];
-		return print(com, 0, 0);
+		c->x = c->y = marks[tolower(*c->arg) - 'a'];
+		return print(c, 0, 0);
 	case 'p':
-		return print(com, 0, 0);
+		return print(c, 0, 0);
 	case 'j':
-		return join(com);
+		return join(c);
 	case 'n':
-		return print(com, 1, 0);
+		return print(c, 1, 0);
 	case 'w':
-		return writefile(com);
+		return writefile(c);
+	case 't':
+		return transfer(c, 1);
+	case 'r':
+		return readfile(c, 0, 1);
 	case 'd':
-		return delete (com);
+		return delete (c, 1);
+	case 'm':
+		return move(c);
 	case '=':
-		if (com->x > endl || com->x <= 0)
-			return 0;
-		printf("%zu\n", com->x);
+		printf("%zu\n", c->x);
 		return 1;
 	case 'k':
-		if (!isalpha((uint8_t)*com->arg))
-			return 0;
-		marks[tolower(*com->arg) - 'a'] = com->x;
+		marks[tolower(*c->arg) - 'a'] = c->x;
 		return 1;
 	case 'f':
 		puts(lastfile);
 		return 1;
 	case 'l':
-		return print(com, 0, 1);
+		return print(c, 0, 1);
 	case 'e':
-		return edit(com);
+		return edit(c);
+	case 'E':
+		change = 0;
+		return edit(c);
 	case 'u':
 		undo();
 		return 1;
@@ -536,30 +739,31 @@ int
 main(int c, char **av)
 {
 	signal(SIGINT, quit);
+	gettimeofday(&tv, NULL);
 	if (--c) {
 		snprintf(lastfile, sizeof(lastfile), "%s", av[1]);
 		if (!edit(NULL))
 			goto err;
 	}
 	for (;;) {
-		char buf[65535] = { 0 }, *s = NULL;
 		edcom com = { .x = -1, .y = -1, .c = 'p' };
-
-		if (!(fgets(buf, sizeof(buf) - 1, stdin)))
+		char buf[65535] = { 0 };
+		if (!fgets(buf, sizeof(buf) - 1, stdin))
 			goto err;
 		buf[strcspn(buf, "\n")] = 0;
 		if (!strlen(buf)) /* null command */
 			com.y = com.x = curl + 1;
-		else if (!(parse(buf, curl, endl, &com)))
+		else if (!parse(buf, curl, endl, &com))
 			goto err;
-		setdefault(&com);
-		if (!(exec(&com)))
+		if (!validate(&com))
 			goto err;
-
+		if (!command(&com))
+			goto err;
 		continue;
 	err:
 		puts("?");
 	}
 
+	/* NOTREACHED */
 	return 0;
 }
