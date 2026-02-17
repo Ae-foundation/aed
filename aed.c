@@ -28,7 +28,7 @@
 
 typedef struct __edcom {
 	ssize_t x, y;	/* range */
-	char c;	/* command */
+	char c;		/* command */
 	char arg[4096]; /* argument */
 } edcom;
 
@@ -50,45 +50,6 @@ tmpclose(int *fd, char *templ)
 		close(*fd);
 	unlink(templ);
 	*fd = -1;
-}
-
-static char *
-special(char *s, size_t cur, size_t end)
-{
-	char *sp = s, *res, c;
-	size_t len = 0, l1, l2;
-	char n1[32], n2[32];
-
-	l1 = snprintf(n1, sizeof(n1), "%zu", cur);
-	l2 = snprintf(n2, sizeof(n2), "%zu", end);
-
-	while ((c = *sp++)) {
-		if (c == '\\' && *sp)
-			++len, ++sp;
-		else if (c == '.')
-			len += l1;
-		else if (c == '$')
-			len += l2;
-		else
-			len++;
-	}
-
-	if (!(res = malloc(len + 1)))
-		return NULL;
-	sp = res;
-
-	while ((c = *s++)) {
-		if (c == '\\' && *s)
-			*sp++ = *s++;
-		else if (c == '.')
-			memcpy(sp, n1, l1), sp += l1;
-		else if (c == '$')
-			memcpy(sp, n2, l2), sp += l2;
-		else
-			*sp++ = c;
-	}
-	*sp = 0;
-	return res;
 }
 
 inline static void
@@ -129,7 +90,7 @@ undo(void)
 }
 
 static inline char *
-expr(char *s, unsigned long long *n)
+expr(char *s, unsigned long long *n, size_t cur, size_t end)
 {
 	unsigned long long tmp;
 	char *endp = s, c;
@@ -138,14 +99,20 @@ expr(char *s, unsigned long long *n)
 		c = *endp++;
 		s = endp;
 
-		if (!isdigit((uint8_t)*s)) {
-			tmp = 1;
-		} else {
+		if (*s == '$') {
+			tmp = end;
+			++endp;
+		} else if (*s == '.') {
+			tmp = cur;
+			++endp;
+		} else if (isdigit((uint8_t)*s)) {
 			errno = 0;
 			tmp = strtoull(s, &endp, 10);
 			if (errno != 0 || s == endp || tmp > SIZE_MAX)
 				return NULL;
-		}
+		} else
+			tmp = 1;
+
 		if (c == '+') {
 			if (SIZE_MAX - *n < tmp)
 				return NULL;
@@ -166,10 +133,11 @@ parse(char *s, size_t cur, size_t end, edcom *out)
 	if (!s || !out)
 		return 0;
 
-	unsigned long long n, j;
+	unsigned long long n;
 	char *sp = s, *endp;
 
-	while (!isalpha((uint8_t)*sp) && *sp != '!' && *sp != '\'' && *sp != '=' && *sp)
+	while (!isalpha((uint8_t)*sp) && *sp != '!' && *sp != '\'' &&
+	    *sp != '=' && *sp)
 		sp++;
 	if (*sp) { /* parse command */
 		out->c = *sp;
@@ -177,45 +145,65 @@ parse(char *s, size_t cur, size_t end, edcom *out)
 			snprintf(out->arg, sizeof(out->arg), "%s", sp + 1);
 	}
 
-	if ((n = sp - s)) { /* parse range */
+	n = sp - s;
+	if (n) { /* parse range */
 		if (*s == ',' || *s == ';') {
 			out->x = (*s == ';') ? cur : 1;
 			out->y = end;
-			if (n > 1) {
-				if (*++s == '-')
+
+			if (n > 1) { /* for y */
+				++s;
+				if (*s == '$' || *s == '.') {
+					n = (*s == '.') ? cur : end;
+					endp = s + 1;
+				} else {
+					if (*s == '-')
+						return 0;
+					errno = 0;
+					n = strtoull(s, &endp, 10);
+					if (errno != 0 || s == endp ||
+					    n > SIZE_MAX)
+						return 0;
+				}
+				if (!expr(endp, &n, cur, end))
+					return 0;
+				out->y = (size_t)n;
+			}
+		} else {
+			if (*s == '$' || *s == '.') { /* for x */
+				n = (*s == '.') ? cur : end;
+				endp = s + 1;
+			} else {
+				if (*s == '-')
 					return 0;
 				errno = 0;
 				n = strtoull(s, &endp, 10);
 				if (errno != 0 || s == endp || n > SIZE_MAX)
 					return 0;
-				if (!expr(endp, &n))
-					return 0;
-				out->y = (size_t)n;
 			}
-		} else {
-			if (*s == '-')
-				return 0;
-			errno = 0;
-			n = strtoull(s, &endp, 10);
-			if (errno != 0 || s == endp || n > SIZE_MAX)
-				return 0;
-			if (!(endp = expr(endp, &n)))
+			if (!(endp = expr(endp, &n, cur, end)))
 				return NULL;
 			out->y = out->x = (size_t)n;
-			if (*endp == ',' || *endp == ';') {
+
+			if (*endp == ',' || *endp == ';') { /* for y */
 				s = endp + 1;
-				if (isdigit((uint8_t)*s)) {
-					if (*s == '-')
-						return 0;
-					errno = 0;
-					j = strtoull(s, &endp, 10);
-					if (errno != 0 || j > SIZE_MAX)
-						return 0;
-					if (s != endp) {
-						if (!expr(endp, &j))
+				if (*s == '$' || *s == '.' ||
+				    isdigit((uint8_t)*s)) {
+					if (*s == '$' || *s == '.') {
+						n = (*s == '.') ? cur : end;
+						endp = s + 1;
+					} else {
+						if (*s == '-')
 							return 0;
-						out->y = (size_t)j;
+						errno = 0;
+						n = strtoull(s, &endp, 10);
+						if (errno != 0 ||
+						    n > SIZE_MAX || s == endp)
+							return 0;
 					}
+					if (!expr(endp, &n, cur, end))
+						return 0;
+					out->y = (size_t)n;
 				}
 			}
 		}
@@ -562,15 +550,10 @@ main(int c, char **av)
 		if (!(fgets(buf, sizeof(buf) - 1, stdin)))
 			goto err;
 		buf[strcspn(buf, "\n")] = 0;
-		if (!(s = special(buf, curl, endl)))
-			goto err;
-		if (!strlen(s)) { /* null command */
+		if (!strlen(buf)) /* null command */
 			com.y = com.x = curl + 1;
-		} else if (!(parse(s, curl, endl, &com))) {
-			free(s);
+		else if (!(parse(buf, curl, endl, &com)))
 			goto err;
-		}
-		free(s);
 		setdefault(&com);
 		if (!(exec(&com)))
 			goto err;
