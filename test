@@ -1,0 +1,16 @@
+#include <stdio.h>
+
+void
+print(void)
+{
+	int n = 10;
+	while (n--)
+		puts("kek");
+}
+
+int
+main(void)
+{
+	print();
+	return 0;
+}

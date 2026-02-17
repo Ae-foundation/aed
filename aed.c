@@ -37,7 +37,7 @@ typedef struct __edcom {
 
 static size_t curl;	    /* current line */
 static size_t endl;	    /* end line (last) */
-static bool change;	    /* change flag */
+static bool cflag;	    /* change flag */
 static char lastfile[4096]; /* last edit file */
 static size_t marks[26];    /*marks */
 static char templ[256];	    /* template main temp file */
@@ -332,7 +332,6 @@ readfile(edcom *c, bool slient, bool save)
 	char ntempl[] = "/tmp/aedreadXXXXXX";
 	ssize_t n, i, k, tot = 0, off, cur = 0, l = 0;
 	char buf[65535], buf1[65535];
-	;
 	int ifd, tmpfd;
 	bool flag = 0;
 
@@ -399,7 +398,7 @@ readfile(edcom *c, bool slient, bool save)
 	tmpclose(&fd, templ);
 	rename(ntempl, templ);
 	fd = tmpfd;
-	change = 1;
+	cflag = 1;
 	curl = c->x + l;
 	endl += l;
 
@@ -409,8 +408,7 @@ readfile(edcom *c, bool slient, bool save)
 
 err:
 	close(ifd);
-	close(tmpfd);
-	unlink(ntempl);
+	tmpclose(&tmpfd, ntempl);
 	return 0;
 }
 
@@ -424,11 +422,17 @@ transfer(edcom *c, bool save)
 	int tmpfd;
 	edcom tmp = { 0 };
 
-	errno = 0;
-	post = strtoull(c->arg, &endp, 10);
-	if (*c->arg == '-' || errno != 0 || endp == c->arg || post > SIZE_MAX ||
-	    post > endl)
-		return 0;
+	if (*c->arg == '$' || *c->arg == '.') {
+		post = (*c->arg == '$') ? endl : curl;
+		endp = c->arg + 1;
+	} else {
+		errno = 0;
+		post = strtoull(c->arg, &endp, 10);
+		if (*c->arg == '-' || errno != 0 || endp == c->arg ||
+		    post > SIZE_MAX || post > endl)
+			return 0;
+	}
+	expr(endp, &post, curl, endl);
 
 	if ((tmpfd = mkstemp(ntempl)) < 0)
 		return 0;
@@ -498,7 +502,7 @@ static bool delete(edcom *c, bool save)
 	curl = c->x;
 	if (curl > endl)
 		curl = endl;
-	change = 1;
+	cflag = 1;
 	return 1;
 }
 
@@ -531,11 +535,63 @@ move(edcom *c)
 }
 
 static bool
+append(edcom *c, bool insert, bool save)
+{
+	char ntempl[] = "/tmp/aedappendXXXXXX";
+	char buf[65535] = { 0 };
+	edcom tmp = { 0 };
+	int tmpfd;
+	ssize_t n;
+
+	if ((tmpfd = mkstemp(ntempl)) < 0)
+		return 0;
+	for (;;) {
+		if (!fgets(buf, sizeof(buf) - 1, stdin))
+			return 0;
+		if (buf[0] == '.' && buf[1] == '\n' && buf[2] == 0)
+			break;
+		n = strlen(buf);
+		if ((write(tmpfd, buf, n)) != n) {
+			tmpclose(&tmpfd, ntempl);
+			return 0;
+		}
+	}
+
+	tmp.x = tmp.y = c->x - ((insert && c->x != 0) ? 1 : 0);
+	snprintf(buf, sizeof(buf), "%s", lastfile);
+	snprintf(lastfile, sizeof(lastfile), "%s", ntempl);
+	readfile(&tmp, 1, save);
+	snprintf(lastfile, sizeof(lastfile), "%s", buf);
+	tmpclose(&tmpfd, ntempl);
+	return 1;
+}
+
+static bool
+change(edcom *c)
+{
+	bool insert = c->y == endl;
+	edcom tmp = { 0 };
+
+	savefile();
+	if (!delete (c, 0))
+		return 0;
+
+	tmp.x = tmp.y = curl;
+	return append(&tmp, !insert, 0);
+}
+
+static bool
 writefile(edcom *c)
 {
 	ssize_t n, i, k, tot = 0, off, cur = 0;
 	char buf[65535];
 	int tmpfd;
+
+	if (!*c->arg || !c->arg[1]) {
+		if (!*lastfile)
+			return 0;
+	} else
+		snprintf(lastfile, sizeof(lastfile), "%s", c->arg + 1);
 
 	if ((tmpfd = open(lastfile, O_WRONLY | O_CREAT | O_TRUNC, 0644)) < 0)
 		return 0;
@@ -562,7 +618,7 @@ ret:
 	printf("Write: %zu [%zu lines]\n", tot,
 	    (endl > 0) ? cur - c->x + 1 : 0);
 	close(tmpfd);
-	change = 0;
+	cflag = 0;
 	return 1;
 }
 
@@ -600,7 +656,7 @@ join(edcom *c)
 	fd = tmpfd;
 	endl = tot;
 	curl = c->x;
-	change = 1;
+	cflag = 1;
 	return 1;
 }
 
@@ -616,6 +672,9 @@ validate(edcom *c)
 		case 'k':
 		case 'm':
 		case 't':
+		case 'a':
+		case 'c':
+		case 'i':
 			c->x = c->y = curl;
 			break;
 		case 'r':
@@ -632,19 +691,14 @@ validate(edcom *c)
 		}
 	}
 	switch (c->c) {
-	case 'Q':
-	case 'E':
-	case 'u':
-		/* NONE */
-		break;
 	case '!':
 		if (!*c->arg)
 			return 0;
 		break;
 	case 'e':
 	case 'q':
-		if (change)
-			return (change = 0);
+		if (cflag)
+			return (cflag = 0);
 		break;
 
 	case 'f':
@@ -666,7 +720,12 @@ validate(edcom *c)
 			return 0;
 		break;
 	case 'r':
+	case 'a':
+	case 'i':
+	case 'c':
 		if (fd < 0 || c->x > endl || c->x < 0)
+			return 0;
+		if (c->c == 'c' && (c->y < 0 || c->y > endl || c->x > c->y))
 			return 0;
 		break;
 	case '=':
@@ -689,7 +748,7 @@ command(edcom *c)
 	case 'q':
 		quit(0);
 	case 'Q':
-		change = 0;
+		cflag = 0;
 		quit(0);
 	case '!':
 		return callunix(c);
@@ -700,6 +759,12 @@ command(edcom *c)
 		return print(c, 0, 0);
 	case 'j':
 		return join(c);
+	case 'a':
+		return append(c, 0, 1);
+	case 'i':
+		return append(c, 1, 1);
+	case 'c':
+		return change(c);
 	case 'n':
 		return print(c, 1, 0);
 	case 'w':
@@ -726,7 +791,7 @@ command(edcom *c)
 	case 'e':
 		return edit(c);
 	case 'E':
-		change = 0;
+		cflag = 0;
 		return edit(c);
 	case 'u':
 		undo();
