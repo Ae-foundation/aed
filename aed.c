@@ -48,58 +48,6 @@ static int fd = -1;	    /* main temp file */
 static int ufd = -1;	    /* undo temp file */
 static time_t tstamp;	    /* for timestamp */
 
-inline static void
-tmpclose(int *fd, char *templ)
-{
-	if (*fd >= 0)
-		close(*fd);
-	unlink(templ);
-	*fd = -1;
-}
-
-inline static void
-tmpchange(int *o, char *ot, int *n, char *nt)
-{
-	tmpclose(o, ot);
-	rename(nt, ot);
-	*o = *n;
-}
-
-static void
-savefile(void)
-{
-	char buf[65535];
-	ssize_t n;
-
-	if (ufd >= 0)
-		tmpclose(&ufd, utempl);
-	snprintf(utempl, sizeof(utempl), "/tmp/aedundoXXXXXX");
-	if ((ufd = mkstemp(utempl)) < 0)
-		return;
-	uendl = endl;
-	lseek(fd, 0, SEEK_SET);
-	while ((n = read(fd, buf, sizeof(buf))))
-		if (write(ufd, buf, n) != n)
-			return tmpclose(&ufd, utempl);
-}
-
-static void
-undo(void)
-{
-	if (ufd < 0)
-		return;
-	char save2[sizeof(templ)];
-	size_t save1 = endl;
-	int save = fd;
-	strcpy(save2, templ);
-	fd = ufd;
-	ufd = save;
-	endl = uendl;
-	uendl = save1;
-	strcpy(templ, utempl);
-	strcpy(utempl, save2);
-}
-
 inline static char *
 expr(char *s, unsigned long long *n, size_t cur, size_t end)
 {
@@ -110,11 +58,8 @@ expr(char *s, unsigned long long *n, size_t cur, size_t end)
 		c = *endp++;
 		s = endp;
 
-		if (*s == '$') {
-			tmp = end;
-			++endp;
-		} else if (*s == '.') {
-			tmp = cur;
+		if (*s == '$' || *s == '.') {
+			tmp = (*s == '$') ? end : cur;
 			++endp;
 		} else if (isdigit((uint8_t)*s)) {
 			errno = 0;
@@ -205,15 +150,35 @@ parse(char *s, size_t cur, size_t end, edcom *out)
 	return 1;
 }
 
-static void
-quit(int sig)
+inline static void
+tmpclose(int *fd, char *templ)
 {
-	(void)sig;
-	tmpclose(&fd, templ);
-	tmpclose(&ufd, utempl);
-	time_t diff = time(NULL);
-	printf("AExit: %ld sec\n", diff - tstamp);
-	exit(0);
+	if (*fd >= 0)
+		close(*fd);
+	unlink(templ);
+	*fd = -1;
+}
+
+inline static void
+tmpchange(int *o, char *ot, int *n, char *nt)
+{
+	tmpclose(o, ot);
+	rename(nt, ot);
+	*o = *n;
+}
+
+inline static bool
+setlastfile(char *filename)
+{
+	while (isspace((uint8_t)*filename))
+		++filename;
+	if (!*filename || !filename[1]) {
+		if (!*lastfile)
+			return 0;
+		return 1;
+	}
+	snprintf(lastfile, sizeof(lastfile), "%s", filename);
+	return 1;
 }
 
 inline static ssize_t
@@ -247,16 +212,126 @@ READ(int fd, void *buf, size_t len)
 	return n;
 }
 
-inline static bool
-setlastfile(char *filename)
+static bool
+WRITEFILE(size_t x, size_t y, int *dst, size_t *bytes, size_t *lines)
 {
-	if (!*filename || !filename[1]) {
-		if (!*lastfile)
-			return 0;
-		return 1;
+	char buf[65535];
+	ssize_t n, i, off;
+	size_t cur = 1;
+
+	lseek(fd, 0, SEEK_SET);
+	while ((n = READ(fd, buf, sizeof(buf))) > 0) {
+		for (i = off = 0; i < n; i++) {
+			if (buf[i] == '\n') {
+				if (cur >= x && cur <= y) {
+					if (WRITE(*dst, buf + off,
+						i - off + 1) < 0)
+						return 0;
+					if (bytes)
+						*bytes += i - off + 1;
+					if (lines)
+						++*lines;
+				}
+				++cur;
+				off = i + 1;
+				if (cur > y)
+					return 1;
+			}
+		}
+		if (cur >= x && cur <= y && n > off) {
+			if (WRITE(*dst, buf + off, n - off) < 0)
+				return 0;
+			if (bytes)
+				*bytes += n - off;
+		}
 	}
-	snprintf(lastfile, sizeof(lastfile), "%s", filename);
+	if (n < 0)
+		return 0;
+
 	return 1;
+}
+
+static bool
+READFILE(size_t x, int *src, size_t *bytes, size_t *lines)
+{
+	char ntempl[] = "/tmp/aedreadXXXXXX";
+	char buf[65535];
+	int tmpfd;
+	ssize_t n;
+
+	if ((tmpfd = mkstemp(ntempl)) < 0)
+		goto err;
+
+	if (x > 0)
+		if (!WRITEFILE(1, x, &tmpfd, NULL, NULL))
+			goto err;
+	lseek(*src, 0, SEEK_SET);
+	while ((n = READ(*src, buf, sizeof(buf))) > 0) {
+		if (WRITE(tmpfd, buf, n) < 0)
+			goto err;
+		if (bytes)
+			*bytes += n;
+		while (n--)
+			if (buf[n] == '\n' && lines)
+				++*lines;
+	}
+	if (n < 0)
+		goto err;
+	if (x < endl)
+		if (!WRITEFILE(x + 1, endl, &tmpfd, NULL, NULL))
+			goto err;
+
+	tmpchange(&fd, templ, &tmpfd, ntempl);
+	return 1;
+err:
+	tmpclose(&tmpfd, ntempl);
+	return 0;
+}
+
+static void
+savefile(void)
+{
+	char buf[65535];
+	ssize_t n;
+
+	if (ufd >= 0)
+		tmpclose(&ufd, utempl);
+	snprintf(utempl, sizeof(utempl), "/tmp/aedundoXXXXXX");
+	if ((ufd = mkstemp(utempl)) < 0)
+		return;
+	uendl = endl;
+	lseek(fd, 0, SEEK_SET);
+	while ((n = read(fd, buf, sizeof(buf))))
+		if (write(ufd, buf, n) != n)
+			return tmpclose(&ufd, utempl);
+}
+
+static void
+undo(void)
+{
+	if (ufd < 0)
+		return;
+	char save2[sizeof(templ)];
+	size_t save1 = endl;
+	int save = fd;
+	strcpy(save2, templ);
+	fd = ufd;
+	ufd = save;
+	endl = uendl;
+	uendl = save1;
+	strcpy(templ, utempl);
+	strcpy(utempl, save2);
+}
+
+static void
+quit(int sig)
+{
+	(void)sig;
+	tmpclose(&fd, templ);
+	tmpclose(&ufd, utempl);
+	time_t diff = time(NULL);
+	printf("AExit: %ld sec\n", diff - tstamp);
+	exit(0);
 }
 
 static bool
@@ -330,82 +405,6 @@ ret:
 }
 
 static bool
-_writefile(size_t x, size_t y, int *dst, size_t *bytes, size_t *lines)
-{
-	char buf[65535];
-	ssize_t n, i, off;
-	size_t cur = 1;
-
-	lseek(fd, 0, SEEK_SET);
-	while ((n = READ(fd, buf, sizeof(buf))) > 0) {
-		for (i = off = 0; i < n; i++) {
-			if (buf[i] == '\n') {
-				if (cur >= x && cur <= y) {
-					if (WRITE(*dst, buf + off,
-						i - off + 1) < 0)
-						return 0;
-					if (bytes)
-						*bytes += i - off + 1;
-					if (lines)
-						++*lines;
-				}
-				++cur;
-				off = i + 1;
-				if (cur > y)
-					return 1;
-			}
-		}
-		if (cur >= x && cur <= y && n > off) {
-			if (WRITE(*dst, buf + off, n - off) < 0)
-				return 0;
-			if (bytes)
-				*bytes += n - off;
-		}
-	}
-	if (n < 0)
-		return 0;
-
-	return 1;
-}
-
-static bool
-_readfile(size_t x, int *src, size_t *bytes, size_t *lines)
-{
-	char ntempl[] = "/tmp/aedreadXXXXXX";
-	char buf[65535];
-	int tmpfd;
-	ssize_t n;
-
-	if ((tmpfd = mkstemp(ntempl)) < 0)
-		goto err;
-
-	if (x > 0)
-		if (!_writefile(1, x, &tmpfd, NULL, NULL))
-			goto err;
-	lseek(*src, 0, SEEK_SET);
-	while ((n = READ(*src, buf, sizeof(buf))) > 0) {
-		if (WRITE(tmpfd, buf, n) < 0)
-			goto err;
-		if (bytes)
-			*bytes += n;
-		while (n--)
-			if (buf[n] == '\n' && lines)
-				++*lines;
-	}
-	if (n < 0)
-		goto err;
-	if (x < endl)
-		if (!_writefile(x + 1, endl, &tmpfd, NULL, NULL))
-			goto err;
-
-	tmpchange(&fd, templ, &tmpfd, ntempl);
-	return 1;
-err:
-	tmpclose(&tmpfd, ntempl);
-	return 0;
-}
-
-static bool
 edit(char *filename)
 {
 	char buf[100];
@@ -417,7 +416,7 @@ edit(char *filename)
 	if (!setlastfile(filename))
 		return 0;
 
-	if ((tmpfd = open(lastfile, O_RDONLY)) < 0)
+	if ((tmpfd = open(lastfile, O_RDONLY | O_CREAT, 0644)) < 0)
 		return 0;
 	endl = 0;
 	tmpclose(&fd, templ);
@@ -468,11 +467,7 @@ writefile(char *filename, size_t x, size_t y)
 		return 0;
 	if ((tmpfd = open(lastfile, O_WRONLY | O_CREAT | O_TRUNC, 0644)) < 0)
 		return 0;
-	if (!_writefile(x, y, &tmpfd, &tot, &nl)) {
-		close(tmpfd);
-		return 0;
-	}
-
+	WRITEFILE(x, y, &tmpfd, &tot, &nl);
 	printf("Write: %zd [%zu lines]\n", tot, nl);
 	close(tmpfd);
 	cflag = 0;
@@ -487,16 +482,14 @@ static bool delete(size_t x, size_t y)
 
 	if ((tmpfd = mkstemp(ntempl)) < 0)
 		return 0;
-	if (!_writefile(1, x - 1, &tmpfd, NULL, &nl))
+	if (!WRITEFILE(1, x - 1, &tmpfd, NULL, &nl))
 		goto err;
-	if (!_writefile(y + 1, endl, &tmpfd, NULL, &nl))
+	if (!WRITEFILE(y + 1, endl, &tmpfd, NULL, &nl))
 		goto err;
 	tmpchange(&fd, templ, &tmpfd, ntempl);
-
 	endl = nl;
 	curl = (x > endl) ? endl : x;
 	cflag = 1;
-
 	return 1;
 err:
 	tmpclose(&tmpfd, ntempl);
@@ -554,12 +547,11 @@ readfile(char *arg, size_t x)
 		return 0;
 	if ((ifd = open(lastfile, O_RDONLY)) < 0)
 		return 0;
-	if (!_readfile(x, &ifd, &tot, &nl)) {
+	if (!READFILE(x, &ifd, &tot, &nl)) {
 		close(ifd);
 		return 0;
 	}
 	close(ifd);
-
 	cflag = 1;
 	curl = x + nl;
 	endl += nl;
@@ -576,11 +568,10 @@ transfer(size_t post, size_t x, size_t y)
 
 	if ((tmpfd = mkstemp(ntempl)) < 0)
 		return 0;
-	if (!_writefile(x, y, &tmpfd, NULL, NULL))
+	if (!WRITEFILE(x, y, &tmpfd, NULL, NULL))
 		goto err;
-	if (!_readfile(post, &tmpfd, NULL, &nl))
+	if (!READFILE(post, &tmpfd, NULL, &nl))
 		goto err;
-
 	endl += nl;
 	curl = post + nl;
 	tmpclose(&tmpfd, ntempl);
@@ -595,14 +586,13 @@ callunix(char *arg)
 {
 	char buf[1024];
 	FILE *fp;
-	int ret;
 
 	if (!(fp = popen(arg, "r")))
 		return 0;
 	while (fgets(buf, sizeof(buf), fp))
 		fputs(buf, stdout);
 
-	ret = pclose(fp);
+	int ret = pclose(fp);
 	puts("!");
 	return (ret != -1) ? 1 : 0;
 }
@@ -631,7 +621,8 @@ append(size_t x, bool insert)
 	}
 
 	n = x - ((insert && x != 0) ? 1 : 0);
-	_readfile(n, &tmpfd, NULL, &nl);
+	READFILE(n, &tmpfd, NULL, &nl);
+
 	curl = n + nl;
 	endl += nl;
 	cflag = 1;
@@ -695,7 +686,6 @@ sparse(char *s, char **p)
 {
 	char *dst = s;
 	int n = 0;
-
 	p[n++] = dst;
 	while (*s) {
 		if (*s == '\\' && s[1] == '/' && s[2] == '/') {
@@ -743,7 +733,7 @@ substitute(char *arg, size_t x, size_t y)
 
 	if ((tmpfd = mkstemp(ntempl)) < 0)
 		return 0;
-	if (!_writefile(x, y, &tmpfd, NULL, NULL))
+	if (!WRITEFILE(x, y, &tmpfd, NULL, NULL))
 		puts("fuck");
 	if ((tmpfd1 = mkstemp(ntempl1)) < 0)
 		return 0;
@@ -758,7 +748,7 @@ substitute(char *arg, size_t x, size_t y)
 	}
 	tmpclose(&tmpfd, ntempl);
 	delete (x, y);
-	_readfile(x - 1, &tmpfd1, NULL, &nl);
+	READFILE(x - 1, &tmpfd1, NULL, &nl);
 
 	tmpclose(&tmpfd1, ntempl1);
 
@@ -777,21 +767,9 @@ substitute(char *arg, size_t x, size_t y)
 static bool
 validate(edcom *c)
 {
+	/* c d j l n p a i = k m t w r */
 	if (c->x == -1 && c->y == -1) {
 		switch (c->c) {
-		case 'p':
-		case 'n':
-		case 'l':
-		case 'd':
-		case 'k':
-		case 'm':
-		case 't':
-		case 'a':
-		case 'c':
-		case 'i':
-		case 's':
-			c->x = c->y = curl;
-			break;
 		case 'r':
 		case '=':
 			c->x = c->y = endl;
@@ -801,13 +779,15 @@ validate(edcom *c)
 			c->y = curl + 1;
 		case 'w':
 			c->x = 1;
-			c->y = endl;
+			c->y = (endl > 0) ? endl : 1;
+			break;
+		default:
+			c->x = c->y = curl;
 			break;
 		}
 	}
 	switch (c->c) {
 	case '!':
-	case 's':
 		if (!*c->arg)
 			return 0;
 		break;
@@ -816,36 +796,35 @@ validate(edcom *c)
 		if (cflag)
 			return (cflag = 0);
 		break;
-
 	case 'f':
 		if (!*lastfile)
+			return 0;
+		break;
+	case 'u':
+		if (ufd < 0)
 			return 0;
 		break;
 	case 'p':
 	case 'n':
 	case 'l':
-	case 't':
 	case 'j':
 	case 'd':
-	case 'm':
+	case 'c':
 	case 'w':
-		if (fd < 0 || c->y > endl || c->x > endl || c->x > c->y ||
-		    c->x <= 0 || c->y <= 0)
+	case 'm':
+	case 't':
+	case 's':
+		if (fd < 0 || c->x > c->y || c->x <= 0 || c->y <= 0)
 			return 0;
-		if (c->c == 'w' && endl <= 0)
+		if (c->c != 'w' && endl <= 0)
+			return 0;
+		if ((c->c == 'm' || c->c == 't' || c->c == 's') && !*c->arg)
 			return 0;
 		break;
 	case 'r':
 	case 'a':
 	case 'i':
-	case 'c':
-		if (fd < 0 || c->x > endl || c->x < 0)
-			return 0;
-		if (c->c == 'c' && (c->y < 0 || c->y > endl || c->x > c->y))
-			return 0;
-		break;
-	case '=':
-		if (c->x > endl || c->x <= 0)
+		if (fd < 0 || c->x < 0)
 			return 0;
 		break;
 	case 'k':
@@ -854,6 +833,7 @@ validate(edcom *c)
 			return 0;
 		break;
 	}
+
 	return 1;
 }
 
@@ -895,7 +875,7 @@ command(edcom *c)
 	case 'n':
 		return print(c->x, c->y, 1, 0);
 	case 'w':
-		return writefile(c->arg + 1, c->x, c->y);
+		return writefile(c->arg, c->x, c->y);
 	case 't': {
 		ssize_t post;
 		if (!aparse(c->arg, &post, curl, endl, NULL))
@@ -905,7 +885,7 @@ command(edcom *c)
 	}
 	case 'r':
 		savefile();
-		return readfile(c->arg + 1, c->x);
+		return readfile(c->arg, c->x);
 	case 'd':
 		savefile();
 		return delete (c->x, c->y);
@@ -934,10 +914,10 @@ command(edcom *c)
 	case 'l':
 		return print(c->x, c->y, 0, 1);
 	case 'e':
-		return edit(c->arg + 1);
+		return edit(c->arg);
 	case 'E':
 		cflag = 0;
-		return edit(c->arg + 1);
+		return edit(c->arg);
 	case 'u':
 		undo();
 		return 1;
