@@ -20,6 +20,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <regex.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -580,6 +581,154 @@ change(edcom *c)
 	return append(&tmp, !insert, 0);
 }
 
+static char *
+aregex(const char *s, const char *re, const char *repl, uint32_t flags)
+{
+#define GFLAG (1 << 1)
+#define LFLAG (1 << 2)
+#define NFLAG (1 << 3)
+	const char *sp = s;
+	regmatch_t m;
+	regex_t regex;
+	int eflags = 0;
+	size_t len = 0, n, rlen = strlen(repl);
+	char *tmp, *res = NULL;
+
+	if (regcomp(&regex, re, 0) != 0)
+		return NULL;
+	while (!regexec(&regex, sp, 1, &m, eflags)) {
+		n = m.rm_so;
+		if (!(tmp = realloc(res, len + n + rlen + 1))) {
+			free(res);
+			regfree(&regex);
+			return NULL;
+		}
+		res = tmp;
+		memcpy(res + len, sp, n);
+		len += n;
+		memcpy(res + len, repl, rlen);
+		len += rlen;
+		sp += m.rm_eo;
+
+		if (!(flags & GFLAG))
+			break;
+
+		if (m.rm_eo == m.rm_so) {
+			if (*sp)
+				++sp;
+			else
+				break;
+		}
+		eflags = REG_NOTBOL;
+	}
+	regfree(&regex);
+	if (!res)
+		return NULL;
+
+	n = strlen(sp);
+	res = realloc(res, len + n + 1);
+	memcpy(res + len, sp, n);
+	res[len + n] = 0;
+	return res;
+}
+
+static inline int
+sparse(char *s, char **p)
+{
+	char *dst = s;
+	int n = 0;
+
+	p[n++] = dst;
+	while (*s) {
+		if (*s == '\\' && s[1] == '/' && s[2] == '/') {
+			s++;
+			*dst++ = *s++;
+		} else if (*s == '/' && n < 3) {
+			*dst = 0;
+			s++;
+			dst = s;
+			p[n++] = dst;
+		} else
+			*dst++ = *s++;
+	}
+	*dst = 0;
+	return n;
+}
+
+static bool
+substitute(edcom *c)
+{
+	char ntempl[] = "/tmp/aedsubstXXXXXX";
+	ssize_t n, i, len, off, cur = 0;
+	char buf[65535], *tmp, *res;
+	uint32_t flags = 0;
+	edcom tmpc = { 0 };
+	int tmpfd;
+	char *p[3];
+
+	if ((n = sparse(c->arg + 1, p)) < 2)
+		return 0;
+	while (n == 3 && *p[2]) {
+		switch (*p[2]++) {
+		case 'g':
+			flags |= GFLAG;
+			break;
+		case 'l':
+			flags |= LFLAG;
+			break;
+		case 'n':
+			flags |= NFLAG;
+			break;
+		}
+	}
+
+	savefile();
+	if ((tmpfd = mkstemp(ntempl)) < 0)
+		return 0;
+
+	lseek(fd, 0, SEEK_SET);
+	while ((n = read(fd, buf, sizeof(buf)))) {
+		for (i = off = 0; i < n; i++) {
+			if (buf[i] != '\n')
+				continue;
+			++cur;
+			len = i - off;
+			if (cur >= c->x && cur <= c->y) {
+				tmp = malloc(len + 1);
+				memcpy(tmp, buf + off, len);
+				tmp[len] = 0;
+				if ((res = aregex(tmp, p[0], p[1], flags))) {
+					write(tmpfd, res, strlen(res));
+					write(tmpfd, "\n", 1);
+					free(res);
+					cflag = 1;
+				} else
+					write(tmpfd, buf + off, len + 1);
+				free(tmp);
+			} else
+				write(tmpfd, buf + off, len + 1);
+			off = i + 1;
+		}
+		if (off < n)
+			lseek(fd, -(n - off), SEEK_CUR);
+	}
+
+	tmpclose(&fd, templ);
+	rename(ntempl, templ);
+	fd = tmpfd;
+
+	endl = cur;
+	curl = c->y;
+
+	tmpc.x = tmpc.y = curl;
+	if (flags & LFLAG)
+		print(&tmpc, 0, 1);
+	if (flags & NFLAG)
+		print(&tmpc, 1, 0);
+	print(&tmpc, 0, 0);
+	return 1;
+}
+
 static bool
 writefile(edcom *c)
 {
@@ -675,6 +824,7 @@ validate(edcom *c)
 		case 'a':
 		case 'c':
 		case 'i':
+		case 's':
 			c->x = c->y = curl;
 			break;
 		case 'r':
@@ -692,6 +842,7 @@ validate(edcom *c)
 	}
 	switch (c->c) {
 	case '!':
+	case 's':
 		if (!*c->arg)
 			return 0;
 		break;
@@ -750,6 +901,8 @@ command(edcom *c)
 	case 'Q':
 		cflag = 0;
 		quit(0);
+	case 's':
+		return substitute(c);
 	case '!':
 		return callunix(c);
 	case '\'':
