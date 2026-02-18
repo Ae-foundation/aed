@@ -406,7 +406,7 @@ ret:
 static bool
 edit(char *filename)
 {
-	char buf[100];
+	char buf[65535];
 	uint8_t l;
 	size_t tot = 0;
 	ssize_t n;
