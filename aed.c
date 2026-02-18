@@ -952,7 +952,6 @@ main(int c, char **av)
 			com.y = com.x = curl + 1;
 		else if (!parse(buf, curl, endl, &com))
 			goto error;
-
 		if (!validate(&com))
 			goto error;
 		if (!command(&com))
