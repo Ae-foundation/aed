@@ -604,8 +604,7 @@ append(size_t x, bool insert)
 			return 0;
 		if (buf[0] == '.' && buf[1] == '\n' && buf[2] == 0)
 			break;
-		n = strlen(buf);
-		if ((WRITE(tmpfd, buf, n)) < 0) {
+		if ((WRITE(tmpfd, buf, strlen(buf))) < 0) {
 			tmpclose(&tmpfd, ntempl);
 			return 0;
 		}
