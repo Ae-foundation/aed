@@ -256,7 +256,7 @@ WRITEFILE(size_t x, size_t y, int *dst, size_t *bytes, size_t *lines)
 static bool
 READFILE(size_t x, int *src, size_t *bytes, size_t *lines)
 {
-	char ntempl[] = "/tmp/aedreadXXXXXX";
+	char ntempl[] = "/tmp/aedXXXXXX";
 	char buf[65535];
 	int tmpfd;
 	ssize_t n;
@@ -293,18 +293,13 @@ err:
 static void
 savefile(void)
 {
-	char buf[65535];
-	ssize_t n;
-	if (ufd >= 0)
-		tmpclose(&ufd, utempl);
-	snprintf(utempl, sizeof(utempl), "/tmp/aedundoXXXXXX");
+	tmpclose(&ufd, utempl);
+	snprintf(utempl, sizeof(utempl), "/tmp/aedXXXXXX");
 	if ((ufd = mkstemp(utempl)) < 0)
 		return;
 	uendl = endl;
-	lseek(fd, 0, SEEK_SET);
-	while ((n = read(fd, buf, sizeof(buf))))
-		if (write(ufd, buf, n) != n)
-			return tmpclose(&ufd, utempl);
+	if (!WRITEFILE(1, endl, &ufd, NULL, NULL))
+		return tmpclose(&ufd, utempl);
 }
 
 static void
@@ -406,7 +401,6 @@ ret:
 static bool
 edit(char *filename)
 {
-	char buf[65535];
 	uint8_t l;
 	size_t tot = 0;
 	ssize_t n;
@@ -414,9 +408,9 @@ edit(char *filename)
 
 	if (!setlastfile(filename))
 		return 0;
+
 	if ((tmpfd = open(lastfile, O_RDONLY | O_CREAT, 0644)) < 0)
 		return 0;
-
 	endl = 0;
 	tmpclose(&fd, templ);
 	snprintf(templ, sizeof(templ), "/tmp/aedXXXXXX");
@@ -424,19 +418,7 @@ edit(char *filename)
 		close(tmpfd);
 		return 0;
 	}
-	while ((n = READ(tmpfd, buf, sizeof(buf))) > 0) {
-		if (WRITE(fd, buf, n) < 0) {
-		err:
-			close(tmpfd);
-			tmpclose(&fd, templ);
-			return 0;
-		}
-		tot += n;
-		while (n--)
-			if (buf[n] == '\n')
-				++endl;
-	}
-	if (n < 0)
+	if (!READFILE(0, &tmpfd, &tot, &endl))
 		goto err;
 	if (tot > 0) {
 		if (lseek(tmpfd, -1, SEEK_CUR) == -1)
@@ -449,11 +431,15 @@ edit(char *filename)
 				goto err;
 		}
 	}
-
 	close(tmpfd);
 	curl = endl;
+
 	printf("AEdit: %zu [%zu lines]\n", tot, endl);
 	return 1;
+err:
+	close(tmpfd);
+	tmpclose(&fd, templ);
+	return 0;
 }
 
 static bool
@@ -466,7 +452,6 @@ writefile(char *filename, size_t x, size_t y)
 		return 0;
 	if ((tmpfd = open(lastfile, O_WRONLY | O_CREAT | O_TRUNC, 0644)) < 0)
 		return 0;
-
 	WRITEFILE(x, y, &tmpfd, &tot, &nl);
 	close(tmpfd);
 	cflag = 0;
@@ -477,7 +462,7 @@ writefile(char *filename, size_t x, size_t y)
 
 static bool delete(size_t x, size_t y)
 {
-	char ntempl[] = "/tmp/aeddeleteXXXXXX";
+	char ntempl[] = "/tmp/aedXXXXXX";
 	size_t nl = 0;
 	int tmpfd;
 
@@ -501,7 +486,52 @@ err:
 static bool
 join(size_t x, size_t y)
 {
-	char ntempl[] = "/tmp/aedjoinXXXXXX";
+	char ntempl[] = "/tmp/aedXXXXXX";
+	char ntempl1[] = "/tmp/aedXXXXXX";
+	char buf[65535];
+	ssize_t n, i, k;
+	size_t nl = 0;
+	int tmpfd = -1, tmpfd1;
+
+	if ((tmpfd = mkstemp(ntempl)) < 0)
+		return 0;
+	if (!WRITEFILE(x, y - 1, &tmpfd, NULL, NULL))
+		goto err;
+	if (!delete(x, y - 1))
+		goto err;
+	if ((tmpfd1 = mkstemp(ntempl1)) < 0)
+		goto err;
+	lseek(tmpfd, 0, SEEK_SET);
+	while ((n = READ(tmpfd, buf, sizeof(buf))) > 0) {
+		for (k = i = 0; i < n; i++)
+			if (buf[i] != '\n')
+				buf[k++] = buf[i];
+		if (k && ((WRITE(tmpfd1, buf, k)) < 0))
+			goto err;
+	}
+	if (n < 0)
+		goto err;
+
+	tmpclose(&tmpfd, ntempl);
+	if (!READFILE(x - 1, &tmpfd1, NULL, &nl))
+		goto err;
+	tmpclose(&tmpfd1, ntempl1);
+
+	curl = x;
+	endl += nl;
+	cflag = 1;
+	return 1;
+err:
+	tmpclose(&tmpfd1, ntempl1);
+	tmpclose(&tmpfd, ntempl);
+	return 0;
+}
+
+/*
+static bool
+join(size_t x, size_t y)
+{
+	char ntempl[] = "/tmp/aedXXXXXX";
 	ssize_t n, i, tot = 0, off, cur = 0;
 	char buf[65535];
 	bool flag = 0;
@@ -538,6 +568,7 @@ join(size_t x, size_t y)
 	cflag = 1;
 	return 1;
 }
+*/
 
 static bool
 readfile(char *arg, size_t x)
@@ -566,7 +597,7 @@ readfile(char *arg, size_t x)
 static bool
 transfer(size_t post, size_t x, size_t y)
 {
-	char ntempl[] = "/tmp/aedtransferXXXXXX";
+	char ntempl[] = "/tmp/aedXXXXXX";
 	size_t nl = 0;
 	int tmpfd;
 
@@ -606,7 +637,7 @@ callunix(char *arg)
 static bool
 append(size_t x, bool insert)
 {
-	char ntempl[] = "/tmp/aedappendXXXXXX";
+	char ntempl[] = "/tmp/aedXXXXXX";
 	char buf[65535] = { 0 };
 	size_t nl = 0;
 	int tmpfd;
@@ -712,8 +743,8 @@ sparse(char *s, char **p)
 static bool
 substitute(char *arg, size_t x, size_t y)
 {
-	char ntempl[] = "/tmp/aedsubstXXXXXX";
-	char ntempl1[] = "/tmp/aedsubstXXXXXX";
+	char ntempl[] = "/tmp/aedXXXXXX";
+	char ntempl1[] = "/tmp/aedXXXXXX";
 	ssize_t n;
 	size_t nl = 0;
 	char buf[65535], *res;
@@ -758,7 +789,6 @@ substitute(char *arg, size_t x, size_t y)
 
 	tmpclose(&tmpfd1, ntempl1);
 
-	endl -= !(y - x) ? 1 : y - x;
 	endl += nl;
 	curl = y;
 	cflag = 1;
