@@ -530,7 +530,11 @@ err:
 }
 
 static int stop = 0;
-static void onsig(int s) { stop = 1; }
+static void
+onsig(int s)
+{
+	stop = 1;
+}
 
 static bool
 callunix(char *arg)
@@ -544,12 +548,12 @@ callunix(char *arg)
 	stop = 0;
 	save = signal(SIGINT, onsig);
 	while (!stop && fgets(buf, sizeof(buf), fp))
-        		fputs(buf, stdout);
+		fputs(buf, stdout);
 	puts("!");
 	pclose(fp);
 
-    	signal(SIGINT, save);
-    	return !stop;
+	signal(SIGINT, save);
+	return !stop;
 }
 
 static bool
