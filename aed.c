@@ -487,51 +487,6 @@ static bool
 join(size_t x, size_t y)
 {
 	char ntempl[] = "/tmp/aedXXXXXX";
-	char ntempl1[] = "/tmp/aedXXXXXX";
-	char buf[65535];
-	ssize_t n, i, k;
-	size_t nl = 0;
-	int tmpfd = -1, tmpfd1;
-
-	if ((tmpfd = mkstemp(ntempl)) < 0)
-		return 0;
-	if (!WRITEFILE(x, y - 1, &tmpfd, NULL, NULL))
-		goto err;
-	if (!delete(x, y - 1))
-		goto err;
-	if ((tmpfd1 = mkstemp(ntempl1)) < 0)
-		goto err;
-	lseek(tmpfd, 0, SEEK_SET);
-	while ((n = READ(tmpfd, buf, sizeof(buf))) > 0) {
-		for (k = i = 0; i < n; i++)
-			if (buf[i] != '\n')
-				buf[k++] = buf[i];
-		if (k && ((WRITE(tmpfd1, buf, k)) < 0))
-			goto err;
-	}
-	if (n < 0)
-		goto err;
-
-	tmpclose(&tmpfd, ntempl);
-	if (!READFILE(x - 1, &tmpfd1, NULL, &nl))
-		goto err;
-	tmpclose(&tmpfd1, ntempl1);
-
-	curl = x;
-	endl += nl;
-	cflag = 1;
-	return 1;
-err:
-	tmpclose(&tmpfd1, ntempl1);
-	tmpclose(&tmpfd, ntempl);
-	return 0;
-}
-
-/*
-static bool
-join(size_t x, size_t y)
-{
-	char ntempl[] = "/tmp/aedXXXXXX";
 	ssize_t n, i, tot = 0, off, cur = 0;
 	char buf[65535];
 	bool flag = 0;
@@ -568,7 +523,6 @@ join(size_t x, size_t y)
 	cflag = 1;
 	return 1;
 }
-*/
 
 static bool
 readfile(char *arg, size_t x)
