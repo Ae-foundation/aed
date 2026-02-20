@@ -701,7 +701,7 @@ substitute(char *arg, size_t x, size_t y)
 	bool skip = 0, flag = 0;
 	uint32_t flags = 0;
 	int tmpfd, tmpfd1;
-	size_t nl = 0;
+	size_t nl = 0, tot = 1, cur = 0;
 	char *p[3];
 	ssize_t n;
 
@@ -743,17 +743,20 @@ substitute(char *arg, size_t x, size_t y)
 					goto err;
 				free(res);
 				skip = flag = 1;
-			} else if (!WRITE(tmpfd1, bp, strlen(bp)))
+				cur = tot;
+			} else if (*bp && !WRITE(tmpfd1, bp, strlen(bp)))
 				goto err;
 			if (np) {
 				if (!WRITE(tmpfd1, "\n", 1))
 					goto err;
 				bp = np + 1;
 				skip = 0;
+				++tot;
 			} else
 				break;
 		}
 	}
+
 	if (n < 0 || !flag)
 		goto err;
 	if (!delete (x, y))
@@ -765,14 +768,14 @@ substitute(char *arg, size_t x, size_t y)
 	tmpclose(&tmpfd1, ntempl1);
 
 	endl += nl;
-	curl = y;
+	curl = x - 1 + cur;
 	cflag = 1;
 
 	if (flags & LFLAG)
-		print(y, y, 0, 1);
+		print(curl, curl, 0, 1);
 	if (flags & NFLAG)
-		print(y, y, 1, 0);
-	print(y, y, 0, 0);
+		print(curl, curl, 1, 0);
+	print(curl, curl, 0, 0);
 	return 1;
 err:
 	tmpclose(&tmpfd1, ntempl1);
