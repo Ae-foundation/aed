@@ -635,48 +635,38 @@ aregex(const char *s, const char *re, const char *repl, uint32_t flags)
 #define GFLAG (1 << 1)
 #define LFLAG (1 << 2)
 #define NFLAG (1 << 3)
-	const char *sp = s;
 	regmatch_t m;
-	regex_t regex;
-	int eflags = 0;
-	size_t len = 0, n, rlen = strlen(repl);
-	char *tmp, *res = NULL;
-
-	if (regcomp(&regex, re, 0) != 0)
+	regex_t rx;
+	if (regcomp(&rx, re, 0) != 0)
 		return NULL;
-	while (!regexec(&regex, sp, 1, &m, eflags)) {
-		n = m.rm_so;
-		if (!(tmp = realloc(res, len + n + rlen + 1))) {
+	size_t len = 0, rlen = strlen(repl);
+	char *res = NULL, *tmp;
+	int eflags = 0;
+
+	while (!regexec(&rx, s, 1, &m, eflags)) {
+		if (!(tmp = realloc(res, len + m.rm_so + rlen + 1))) {
 			free(res);
-			regfree(&regex);
+			regfree(&rx);
 			return NULL;
 		}
-		res = tmp;
-		memcpy(res + len, sp, n);
-		len += n;
-		memcpy(res + len, repl, rlen);
+		memcpy((res = tmp) + len, s, m.rm_so);
+		memcpy(res + (len += m.rm_so), repl, rlen);
 		len += rlen;
-		sp += m.rm_eo;
-
+		s += m.rm_eo;
 		if (!(flags & GFLAG))
 			break;
-
-		if (m.rm_eo == m.rm_so) {
-			if (*sp)
-				++sp;
-			else
-				break;
-		}
+		if (m.rm_so == m.rm_eo && *s)
+			s++;
+		if (m.rm_so == m.rm_eo && !*s)
+			break;
 		eflags = REG_NOTBOL;
 	}
-	regfree(&regex);
-	if (!res)
-		return NULL;
+	if (res) {
+		res = realloc(res, len + strlen(s) + 1);
+		strcpy(res + len, s);
+	}
 
-	n = strlen(sp);
-	res = realloc(res, len + n + 1);
-	memcpy(res + len, sp, n);
-	res[len + n] = 0;
+	regfree(&rx);
 	return res;
 }
 
@@ -705,14 +695,15 @@ sparse(char *s, char **p)
 static bool
 substitute(char *arg, size_t x, size_t y)
 {
-	char ntempl[] = "/tmp/aedXXXXXX";
 	char ntempl1[] = "/tmp/aedXXXXXX";
-	ssize_t n;
-	size_t nl = 0;
-	char buf[65535], *res;
+	char ntempl[] = "/tmp/aedXXXXXX";
+	char buf[65535], *res, *bp, *np;
+	bool skip = 0, flag = 0;
 	uint32_t flags = 0;
 	int tmpfd, tmpfd1;
+	size_t nl = 0;
 	char *p[3];
+	ssize_t n;
 
 	if ((n = sparse(arg, p)) < 2)
 		return 0;
@@ -733,23 +724,44 @@ substitute(char *arg, size_t x, size_t y)
 	if ((tmpfd = mkstemp(ntempl)) < 0)
 		return 0;
 	if (!WRITEFILE(x, y, &tmpfd, NULL, NULL))
-		puts("fuck");
+		goto err;
 	if ((tmpfd1 = mkstemp(ntempl1)) < 0)
-		return 0;
+		goto err;
 
 	lseek(tmpfd, 0, SEEK_SET);
 	while ((n = READ(tmpfd, buf, sizeof(buf) - 1)) > 0) {
+		bp = buf;
 		buf[n] = 0;
-		if ((res = aregex(buf, p[0], p[1], flags))) {
-			WRITE(tmpfd1, res, strlen(res));
-			free(res);
-		} else
-			WRITE(tmpfd1, buf, n);
+		while (bp < buf + n) {
+			if ((np = index(bp, '\n')))
+				*np = 0;
+			res = (!skip || (flags & GFLAG)) ?
+			    aregex(bp, p[0], p[1], flags) :
+			    NULL;
+			if (res) {
+				if (!WRITE(tmpfd1, res, strlen(res)))
+					goto err;
+				free(res);
+				skip = flag = 1;
+			} else if (!WRITE(tmpfd1, bp, strlen(bp)))
+				goto err;
+			if (np) {
+				if (!WRITE(tmpfd1, "\n", 1))
+					goto err;
+				bp = np + 1;
+				skip = 0;
+			} else
+				break;
+		}
 	}
+	if (n < 0 || !flag)
+		goto err;
+	if (!delete (x, y))
+		goto err;
+	if (!READFILE(x - 1, &tmpfd1, NULL, &nl))
+		goto err;
 
 	tmpclose(&tmpfd, ntempl);
-	delete (x, y);
-	READFILE(x - 1, &tmpfd1, NULL, &nl);
 	tmpclose(&tmpfd1, ntempl1);
 
 	endl += nl;
@@ -761,8 +773,11 @@ substitute(char *arg, size_t x, size_t y)
 	if (flags & NFLAG)
 		print(y, y, 1, 0);
 	print(y, y, 0, 0);
-
 	return 1;
+err:
+	tmpclose(&tmpfd1, ntempl1);
+	tmpclose(&tmpfd, ntempl);
+	return 0;
 }
 
 static bool
@@ -777,6 +792,7 @@ validate(edcom *c)
 		case 'j':
 			c->x = curl;
 			c->y = curl + 1;
+			break;
 		case 'w':
 			c->x = 1;
 			c->y = (endl > 0) ? endl : 1;
