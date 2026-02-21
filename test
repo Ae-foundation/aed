@@ -1,7 +1,8 @@
 #include <stdio.h>
-
-int main(int c, char **av)
+int main(void)
 {
-	puts(av[1]);
+	int n = 5;
+	while (n--)
+		puts("kek");
 	return 0;
 }

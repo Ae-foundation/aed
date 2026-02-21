@@ -211,46 +211,76 @@ READ(int fd, void *buf, size_t len)
 	return n;
 }
 
-static bool
+inline static ssize_t
+GETLINE(char **linep, int fd)
+{
+	ssize_t i = 0, n;
+	uint8_t c;
+
+	*linep = NULL;
+	while ((n = READ(fd, &c, 1)) > 0) {
+		*linep = realloc(*linep, i + 2);
+		(*linep)[i++] = c;
+		if (c == '\n')
+			break;
+	}
+	if (n < 0)
+		return -1;
+	if (i > 0)
+		(*linep)[i] = 0;
+
+	return i;
+}
+
+inline static ssize_t
+GETLINERG(size_t x, size_t y, size_t *cur, char **linep, int fd)
+{
+	ssize_t n;
+	char *lp;
+
+	while ((n = GETLINE(&lp, fd)) > 0) {
+		if (++(*cur) < x || *cur > y) {
+			free(lp);
+			continue;
+		}
+		*linep = lp;
+		break;
+	}
+
+	return n;
+}
+
+inline static bool
 WRITEFILE(size_t x, size_t y, int *dst, size_t *bytes, size_t *lines)
 {
-	char buf[65535];
-	ssize_t n, i, off;
-	size_t cur = 1;
+	size_t i = 0, tot = 0, nl = 0;
+	ssize_t n;
+	char *lp;
+
+	if (x > y)
+		return 1;
 
 	lseek(fd, 0, SEEK_SET);
-	while ((n = READ(fd, buf, sizeof(buf))) > 0) {
-		for (i = off = 0; i < n; i++) {
-			if (buf[i] == '\n') {
-				if (cur >= x && cur <= y) {
-					if (WRITE(*dst, buf + off,
-						i - off + 1) < 0)
-						return 0;
-					if (bytes)
-						*bytes += i - off + 1;
-					if (lines)
-						++*lines;
-				}
-				++cur;
-				off = i + 1;
-				if (cur > y)
-					return 1;
-			}
+	while ((n = GETLINERG(x, y, &i, &lp, fd)) > 0) {
+		if ((n = WRITE(*dst, lp, n)) < 0) {
+			free(lp);
+			return 0;
 		}
-		if (cur >= x && cur <= y && n > off) {
-			if (WRITE(*dst, buf + off, n - off) < 0)
-				return 0;
-			if (bytes)
-				*bytes += n - off;
-		}
+		free(lp);
+		tot += n;
+		++nl;
 	}
 	if (n < 0)
 		return 0;
+	if (lines)
+		*lines += nl;
+	if (bytes)
+		*bytes += tot;
 
 	return 1;
 }
 
-static bool
+inline static bool
 READFILE(size_t x, int *src, size_t *bytes, size_t *lines)
 {
 	char ntempl[] = "/tmp/aedXXXXXX";
@@ -260,7 +290,6 @@ READFILE(size_t x, int *src, size_t *bytes, size_t *lines)
 
 	if ((tmpfd = mkstemp(ntempl)) < 0)
 		goto err;
-
 	if (x > 0)
 		if (!WRITEFILE(1, x, &tmpfd, NULL, NULL))
 			goto err;
@@ -270,8 +299,8 @@ READFILE(size_t x, int *src, size_t *bytes, size_t *lines)
 			goto err;
 		if (bytes)
 			*bytes += n;
-		while (n--)
-			if (buf[n] == '\n' && lines)
+		while (lines && n--)
+			if (buf[n] == '\n')
 				++*lines;
 	}
 	if (n < 0)
@@ -279,8 +308,8 @@ READFILE(size_t x, int *src, size_t *bytes, size_t *lines)
 	if (x < endl)
 		if (!WRITEFILE(x + 1, endl, &tmpfd, NULL, NULL))
 			goto err;
-
 	tmpchange(&fd, templ, &tmpfd, ntempl);
+
 	return 1;
 err:
 	tmpclose(&tmpfd, ntempl);
@@ -329,69 +358,58 @@ quit(int sig)
 static bool
 print(size_t x, size_t y, bool number, bool list)
 {
-	char buf[65535];
-	size_t cur = 0;
-	bool flag = 1;
-	ssize_t n, i;
+	ssize_t n, k;
+	size_t i = 0;
+	char *lp;
 
 	lseek(fd, 0, SEEK_SET);
-	while ((n = READ(fd, buf, sizeof(buf))) > 0) {
-		for (i = 0; i < n; i++) {
-			if (flag) {
-				if (++cur > y)
-					goto ret;
-				if (cur >= x && number)
-					printf("%zu\t", cur);
-				flag = 0;
+	while ((n = GETLINERG(x, y, &i, &lp, fd)) > 0) {
+		if (number)
+			printf("%zu\t", i);
+		for (k = 0; k < n; k++) {
+			if (!list) {
+				putchar(lp[k]);
+				continue;
 			}
-			if (cur >= x) {
-				if (!list) {
-					putchar(buf[i]);
-				} else {
-					switch (buf[i]) {
-					case '\\':
-						printf("\\\\");
-						break;
-					case '\a':
-						printf("\\a");
-						break;
-					case '\n':
-						puts("$");
-						break;
-					case '\t':
-						printf("\\t");
-						break;
-					case '\b':
-						printf("\\b");
-						break;
-					case '\f':
-						printf("\\f");
-						break;
-					case '\r':
-						printf("\\r");
-						break;
-					case '\v':
-						printf("\\v");
-						break;
-					default:
-						if (isprint((uint8_t)buf[i]))
-							putchar(buf[i]);
-						else
-							printf("\\%03x",
-							    (uint8_t)buf[i]);
-						break;
-					}
-				}
+			switch (lp[k]) {
+			case '\\':
+				printf("\\\\");
+				break;
+			case '\a':
+				printf("\\a");
+				break;
+			case '\n':
+				puts("$");
+				break;
+			case '\t':
+				printf("\\t");
+				break;
+			case '\b':
+				printf("\\b");
+				break;
+			case '\f':
+				printf("\\f");
+				break;
+			case '\r':
+				printf("\\r");
+				break;
+			case '\v':
+				printf("\\v");
+				break;
+			default:
+				if (isprint((uint8_t)lp[k]))
+					putchar(lp[k]);
+				else
+					printf("\\%03x", (uint8_t)lp[k]);
+				break;
 			}
-			if (buf[i] == '\n')
-				flag = 1;
 		}
+		free(lp);
 	}
 	if (n < 0)
 		return 0;
-ret:
-	if (cur)
-		curl = (cur > y) ? y : cur;
+
+	curl = y;
 	return 1;
 }
 
@@ -578,7 +596,7 @@ append(size_t x, bool insert)
 		}
 	}
 
-	n = x - ((insert && x != 0) ? 1 : 0);
+	n = x - ((insert && x) ? 1 : 0);
 	READFILE(n, &tmpfd, NULL, &nl);
 	tmpclose(&tmpfd, ntempl);
 
@@ -591,33 +609,23 @@ append(size_t x, bool insert)
 static bool
 join(size_t x, size_t y)
 {
-	char ntempl[] = "/tmp/aedXXXXXX";
-	ssize_t n, i, tot = 0, off, cur = 0;
-	char buf[65535];
+	char ntempl[] = "/tmp/aedXXXXXX", *lp;
+	size_t i = 0, tot = 0;
 	bool flag = 0;
+	ssize_t n;
 	int tmpfd;
 
 	if ((tmpfd = mkstemp(ntempl)) < 0)
 		return 0;
-
 	lseek(fd, 0, SEEK_SET);
-	while ((n = READ(fd, buf, sizeof(buf))) > 0) {
-		for (i = off = 0; i < n; i++) {
-			if (buf[i] != '\n')
-				continue;
-			++cur;
-			flag = (cur < x || cur >= y);
-			if ((WRITE(tmpfd, buf + off, i - off + flag)) < 0) {
-			err:
-				tmpclose(&tmpfd, ntempl);
-				return 0;
-			}
-			tot += flag;
-			off = i + 1;
+	while ((n = GETLINE(&lp, fd)) > 0) {
+		tot += !(flag = (++i >= x && i < y));
+		if ((WRITE(tmpfd, lp, n - flag)) < 0) {
+		err:
+			tmpclose(&tmpfd, ntempl);
+			return 0;
 		}
-		if (off < n)
-			if ((WRITE(tmpfd, buf + off, n - off)) < 0)
-				goto err;
+		free(lp);
 	}
 	if (n < 0)
 		goto err;
@@ -675,6 +683,7 @@ sparse(char *s, char **p)
 {
 	char *dst = s;
 	int n = 0;
+
 	p[n++] = dst;
 	while (*s) {
 		if (*s == '\\' && s[1] == '/' && s[2] == '/') {
@@ -688,6 +697,7 @@ sparse(char *s, char **p)
 		} else
 			*dst++ = *s++;
 	}
+
 	*dst = 0;
 	return n;
 }
@@ -695,14 +705,12 @@ sparse(char *s, char **p)
 static bool
 substitute(char *arg, size_t x, size_t y)
 {
-	char ntempl1[] = "/tmp/aedXXXXXX";
 	char ntempl[] = "/tmp/aedXXXXXX";
-	char buf[65535], *res, *bp, *np;
-	bool skip = 0, flag = 0;
+	size_t cur = 0, i = 0;
 	uint32_t flags = 0;
-	int tmpfd, tmpfd1;
-	size_t nl = 0, tot = 1, cur = 0;
+	char *res, *lp;
 	char *p[3];
+	int tmpfd;
 	ssize_t n;
 
 	if ((n = sparse(arg, p)) < 2)
@@ -723,54 +731,33 @@ substitute(char *arg, size_t x, size_t y)
 
 	if ((tmpfd = mkstemp(ntempl)) < 0)
 		return 0;
-	if (!WRITEFILE(x, y, &tmpfd, NULL, NULL))
-		goto err;
-	if ((tmpfd1 = mkstemp(ntempl1)) < 0)
-		goto err;
-
-	lseek(tmpfd, 0, SEEK_SET);
-	while ((n = READ(tmpfd, buf, sizeof(buf) - 1)) > 0) {
-		bp = buf;
-		buf[n] = 0;
-		while (bp < buf + n) {
-			if ((np = index(bp, '\n')))
-				*np = 0;
-			res = (!skip || (flags & GFLAG)) ?
-			    aregex(bp, p[0], p[1], flags) :
-			    NULL;
-			if (res) {
-				if (!WRITE(tmpfd1, res, strlen(res)))
-					goto err;
-				free(res);
-				skip = flag = 1;
-				cur = tot;
-			} else if (*bp && !WRITE(tmpfd1, bp, strlen(bp)))
+	lseek(fd, 0, SEEK_SET);
+	while ((n = GETLINE(&lp, fd)) > 0) {
+		if (++i < x || i > y) {
+		next:
+			lp[n - 1] = '\n';
+			if (!WRITE(tmpfd, lp, n))
 				goto err;
-			if (np) {
-				if (!WRITE(tmpfd1, "\n", 1))
-					goto err;
-				bp = np + 1;
-				skip = 0;
-				++tot;
-			} else
-				break;
+			free(lp);
+			continue;
 		}
+		lp[n - 1] = 0;
+		if (!(res = aregex(lp, p[0], p[1], flags)))
+			goto next;
+		if (!WRITE(tmpfd, res, strlen(res)))
+			goto err;
+		free(res);
+		if (!WRITE(tmpfd, "\n", 1))
+			goto err;
+		cur = i;
+		free(lp);
 	}
-
-	if (n < 0 || !flag)
-		goto err;
-	if (!delete (x, y))
-		goto err;
-	if (!READFILE(x - 1, &tmpfd1, NULL, &nl))
+	if (n < 0 || !cur)
 		goto err;
 
-	tmpclose(&tmpfd, ntempl);
-	tmpclose(&tmpfd1, ntempl1);
-
-	endl += nl;
-	curl = x - 1 + cur;
+	tmpchange(&fd, templ, &tmpfd, ntempl);
+	curl = cur;
 	cflag = 1;
-
 	if (flags & LFLAG)
 		print(curl, curl, 0, 1);
 	if (flags & NFLAG)
@@ -778,7 +765,10 @@ substitute(char *arg, size_t x, size_t y)
 	print(curl, curl, 0, 0);
 	return 1;
 err:
-	tmpclose(&tmpfd1, ntempl1);
+	if (lp)
+		free(lp);
+	if (res)
+		free(res);
 	tmpclose(&tmpfd, ntempl);
 	return 0;
 }
