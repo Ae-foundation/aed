@@ -89,7 +89,10 @@ aparse(char *arg, ssize_t *n, size_t cur, size_t end, char **endp)
 	unsigned long long tmp;
 	char *endpt;
 
-	if (*arg == '$' || *arg == '.') {
+	if (*arg == '+' || *arg == '-') {
+		tmp = cur;
+		endpt = arg;
+	} else if (*arg == '$' || *arg == '.') {
 		tmp = (*arg == '$') ? end : cur;
 		endpt = arg + 1;
 	} else {
@@ -98,7 +101,6 @@ aparse(char *arg, ssize_t *n, size_t cur, size_t end, char **endp)
 		if (*arg == '-' || errno != 0 || endpt == arg || tmp > SIZE_MAX)
 			return 0;
 	}
-
 	if (!(endpt = expr(endpt, &tmp, cur, end)))
 		return 0;
 	if (tmp > end)
@@ -238,6 +240,7 @@ GETLINERG(size_t x, size_t y, size_t *cur, char **linep, int fd)
 	ssize_t n;
 	char *lp;
 
+	/* 01 = 11, 10 = 11, 00 = 11 */
 	while ((n = GETLINE(&lp, fd)) > 0) {
 		if (++(*cur) < x || *cur > y) {
 			free(lp);
@@ -256,9 +259,6 @@ WRITEFILE(size_t x, size_t y, int *dst, size_t *bytes, size_t *lines)
 	size_t i = 0, tot = 0, nl = 0;
 	ssize_t n;
 	char *lp;
-
-	if (x > y)
-		return 1;
 
 	lseek(fd, 0, SEEK_SET);
 	while ((n = GETLINERG(x, y, &i, &lp, fd)) > 0) {
@@ -358,51 +358,25 @@ quit(int sig)
 static bool
 print(size_t x, size_t y, bool number, bool list)
 {
+	char *lp, *esc = "\\\a\t\b\f\r\v", *cp;
 	ssize_t n, k;
 	size_t i = 0;
-	char *lp;
 
 	lseek(fd, 0, SEEK_SET);
 	while ((n = GETLINERG(x, y, &i, &lp, fd)) > 0) {
 		if (number)
 			printf("%zu\t", i);
 		for (k = 0; k < n; k++) {
-			if (!list) {
+			if (!list)
 				putchar(lp[k]);
-				continue;
-			}
-			switch (lp[k]) {
-			case '\\':
-				printf("\\\\");
-				break;
-			case '\a':
-				printf("\\a");
-				break;
-			case '\n':
+			else if (lp[k] == '\n')
 				puts("$");
-				break;
-			case '\t':
-				printf("\\t");
-				break;
-			case '\b':
-				printf("\\b");
-				break;
-			case '\f':
-				printf("\\f");
-				break;
-			case '\r':
-				printf("\\r");
-				break;
-			case '\v':
-				printf("\\v");
-				break;
-			default:
-				if (isprint((uint8_t)lp[k]))
-					putchar(lp[k]);
-				else
-					printf("\\%03x", (uint8_t)lp[k]);
-				break;
-			}
+			else if ((cp = index(esc, lp[k])))
+				printf("\\%c", "\\atbfrv"[cp - esc]);
+			else if (isprint((uint8_t)lp[k]))
+				putchar(lp[k]);
+			else
+				printf("\\%03x", (uint8_t)lp[k]);
 		}
 		free(lp);
 	}
@@ -423,7 +397,6 @@ edit(char *filename)
 
 	if (!setlastfile(filename))
 		return 0;
-
 	if ((tmpfd = open(lastfile, O_RDONLY | O_CREAT, 0644)) < 0)
 		return 0;
 	endl = 0;
@@ -436,7 +409,7 @@ edit(char *filename)
 	if (!READFILE(0, &tmpfd, &tot, &endl))
 		goto err;
 	if (tot > 0) {
-		if (lseek(tmpfd, -1, SEEK_CUR) == -1)
+		if (lseek(tmpfd, -1, SEEK_CUR) < 0)
 			goto err;
 		if ((n = READ(tmpfd, &l, 1)) < 0)
 			goto err;
@@ -491,11 +464,11 @@ readfile(char *arg, size_t x)
 		return 0;
 	if (!(ret = READFILE(x, &ifd, &tot, &nl)))
 		printf("FAILED: ");
+
 	close(ifd);
 	curl = x + nl;
 	endl += nl;
 	cflag = 1;
-
 	printf("Read: %zu [%zu lines]\n", tot, nl);
 	return ret;
 }
@@ -508,14 +481,14 @@ static bool delete(size_t x, size_t y)
 
 	if ((tmpfd = mkstemp(ntempl)) < 0)
 		return 0;
-	if (!WRITEFILE(1, x - 1, &tmpfd, NULL, &nl))
+	if (x > 1 && !WRITEFILE(1, x - 1, &tmpfd, NULL, &nl))
 		goto err;
 	if (!WRITEFILE(y + 1, endl, &tmpfd, NULL, &nl))
 		goto err;
 
 	tmpchange(&fd, templ, &tmpfd, ntempl);
 	endl = nl;
-	curl = (x > endl) ? endl : x;
+	curl = (x > nl) ? nl : x;
 	cflag = 1;
 	return 1;
 err:
@@ -948,7 +921,6 @@ main(int c, char **av)
 		if (!fgets(buf, sizeof(buf) - 1, stdin))
 			goto error;
 		buf[strcspn(buf, "\n")] = 0;
-
 		if (!strlen(buf)) /* null command */
 			com.y = com.x = curl + 1;
 		else if (!parse(buf, curl, endl, &com))
