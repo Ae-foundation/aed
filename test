@@ -2,7 +2,7 @@
 
 int main(void)
 {
-	int n = 5;
+	int n = 4; int i;
 	while (n--)
 		puts("kek");
 	return 0;
