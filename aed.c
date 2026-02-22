@@ -44,7 +44,7 @@ static size_t curl;	    /* current line */
 static size_t endl;	    /* end line (last) */
 static bool cflag;	    /* change flag */
 static char lastfile[4096]; /* last edit file */
-static size_t marks[26];    /*marks */
+static size_t marks[26];    /* marks */
 static char templ[TPLSIZ];  /* template main temp file */
 static char utempl[TPLSIZ]; /* template undo temp file */
 static size_t uendl;	    /* undo end line (last) */
