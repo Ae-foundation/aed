@@ -32,6 +32,7 @@
 
 #define ASTYLE "\033[1;37m"
 #define ARESET "\033[0m"
+#define TPLSIZ 256
 
 typedef struct __edcom {
 	ssize_t x, y;	/* range */
@@ -44,12 +45,13 @@ static size_t endl;	    /* end line (last) */
 static bool cflag;	    /* change flag */
 static char lastfile[4096]; /* last edit file */
 static size_t marks[26];    /*marks */
-static char templ[256];	    /* template main temp file */
-static char utempl[256];    /* template undo temp file */
+static char templ[TPLSIZ];  /* template main temp file */
+static char utempl[TPLSIZ]; /* template undo temp file */
 static size_t uendl;	    /* undo end line (last) */
 static int fd = -1;	    /* main temp file */
 static int ufd = -1;	    /* undo temp file */
 static time_t tstamp;	    /* for timestamp */
+static char tmpbuf[65535];  /* buffer for functions */
 
 inline static char *
 expr(char *s, unsigned long long *n, size_t cur, size_t end)
@@ -176,7 +178,7 @@ setlastfile(char *filename)
 {
 	while (isspace((uint8_t)*filename))
 		++filename;
-	if (!*filename || !filename[1]) {
+	if (!*filename) {
 		if (!*lastfile)
 			return 0;
 		return 1;
@@ -293,7 +295,6 @@ inline static bool
 READFILE(size_t x, int *src, size_t *bytes, size_t *lines)
 {
 	char ntempl[] = "/tmp/aedXXXXXX";
-	char buf[65535];
 	int tmpfd;
 	ssize_t n;
 
@@ -302,13 +303,13 @@ READFILE(size_t x, int *src, size_t *bytes, size_t *lines)
 	if (x > 0 && !WRITEFILE(1, x, &tmpfd, NULL, NULL))
 		goto err;
 	lseek(*src, 0, SEEK_SET);
-	while ((n = READ(*src, buf, sizeof(buf))) > 0) {
-		if (WRITE(tmpfd, buf, n) < 0)
+	while ((n = READ(*src, tmpbuf, sizeof(tmpbuf))) > 0) {
+		if (WRITE(tmpfd, tmpbuf, n) < 0)
 			goto err;
 		if (bytes)
 			*bytes += n;
 		while (lines && n--)
-			if (buf[n] == '\n')
+			if (tmpbuf[n] == '\n')
 				++*lines;
 	}
 	if (n < 0)
@@ -472,7 +473,7 @@ readfile(char *arg, size_t x)
 
 	close(ifd);
 	printf("Read: %zu [%zu lines]\n", bytes, nl);
-	update(x + nl, endl + nl, 1);
+	update((x + nl) ? x + nl : 1, endl + nl, 1);
 	return ret;
 }
 
@@ -529,7 +530,6 @@ onsig(int s)
 static bool
 callunix(char *arg)
 {
-	char buf[65535];
 	void (*save)(int);
 	FILE *fp;
 
@@ -537,8 +537,8 @@ callunix(char *arg)
 		return 0;
 	stop = 0;
 	save = signal(SIGINT, onsig);
-	while (!stop && fgets(buf, sizeof(buf), fp))
-		fputs(buf, stdout);
+	while (!stop && fgets(tmpbuf, sizeof(tmpbuf), fp))
+		fputs(tmpbuf, stdout);
 
 	puts("!");
 	pclose(fp);
@@ -551,27 +551,26 @@ append(size_t x, bool insert)
 {
 	char ntempl[] = "/tmp/aedXXXXXX";
 	size_t nl = 0, n;
-	char buf[65535];
 	int tmpfd;
 
 	if ((tmpfd = mkstemp(ntempl)) < 0)
 		return 0;
 	for (;;) {
-		if (!fgets(buf, sizeof(buf) - 1, stdin)) {
+		if (!fgets(tmpbuf, sizeof(tmpbuf) - 1, stdin)) {
 		err:
 			tmpclose(&tmpfd, ntempl);
 			return 0;
 		}
-		if (buf[0] == '.' && buf[1] == '\n' && buf[2] == 0)
+		if (tmpbuf[0] == '.' && tmpbuf[1] == '\n' && tmpbuf[2] == 0)
 			break;
-		if ((WRITE(tmpfd, buf, strlen(buf))) < 0)
+		if ((WRITE(tmpfd, tmpbuf, strlen(tmpbuf))) < 0)
 			goto err;
 	}
 	n = x - (insert && x);
 	READFILE(n, &tmpfd, NULL, &nl);
 
 	tmpclose(&tmpfd, ntempl);
-	update(n + nl, endl + nl, 1);
+	update(!(n + nl) && endl ? 1 : n + nl, endl + nl, nl);
 	return 1;
 }
 
@@ -600,7 +599,7 @@ join(size_t x, size_t y)
 		goto err;
 
 	tmpchange(&fd, templ, &tmpfd, ntempl);
-	update(x, nl, 1);
+	update(x, nl, (endl > nl));
 	return 1;
 }
 
@@ -699,23 +698,22 @@ substitute(char *arg, size_t x, size_t y)
 		return 0;
 	lseek(fd, 0, SEEK_SET);
 	while ((n = GETLINE(&lp, fd)) > 0) {
-		if (++i < x || i > y) {
-		next:
-			lp[n - 1] = '\n';
+		res = NULL;
+		if (++i >= x && i <= y) {
+			lp[n - 1] = 0;
+			res = aregex(lp, p[0], p[1], flags);
+		}
+		if (res) {
+			if (!WRITE(tmpfd, res, strlen(res)) ||
+			    !WRITE(tmpfd, "\n", 1))
+				goto err;
+			nl = i;
+			free(res);
+		} else {
+			lp[n - 1] = '\n'; /* return */
 			if (!WRITE(tmpfd, lp, n))
 				goto err;
-			free(lp);
-			continue;
 		}
-		lp[n - 1] = 0;
-		if (!(res = aregex(lp, p[0], p[1], flags)))
-			goto next;
-		if (!WRITE(tmpfd, res, strlen(res)))
-			goto err;
-		free(res);
-		if (!WRITE(tmpfd, "\n", 1))
-			goto err;
-		nl = i;
 		free(lp);
 	}
 	if (n < 0 || !nl)
@@ -901,22 +899,19 @@ command(edcom *c)
 int
 main(int c, char **av)
 {
-	char in[65535];
-	edcom com;
-
 	tstamp = time(NULL);
 	signal(SIGINT, quit);
 	if (--c)
 		if (!edit(av[1]))
 			goto err;
 	for (;;) {
-		com.x = -1, com.y = -1, com.c = 'p', *com.arg = 0;
-		if (!fgets(in, sizeof(in) - 1, stdin))
+		edcom com = { .x = -1, .y = -1, .c = 'p' };
+		if (!fgets(tmpbuf, sizeof(tmpbuf) - 1, stdin))
 			goto err;
-		in[strcspn(in, "\n")] = 0;
-		if (!strlen(in)) /* null command */
+		tmpbuf[strcspn(tmpbuf, "\n")] = 0;
+		if (!strlen(tmpbuf)) /* null command */
 			com.y = com.x = curl + 1;
-		else if (!parse(in, curl, endl, &com))
+		else if (!parse(tmpbuf, curl, endl, &com))
 			goto err;
 		if (!validate(&com))
 			goto err;
@@ -926,7 +921,6 @@ main(int c, char **av)
 	err:
 		puts("?");
 	}
-
 	/* NOTREACHED */
 	return 0;
 }

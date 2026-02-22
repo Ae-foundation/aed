@@ -2,8 +2,6 @@
 
 int main(void)
 {
-	int n = 4; int i;
-	while (n--)
-		puts("kek");
+	puts("kek");
 	return 0;
 }
