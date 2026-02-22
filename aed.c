@@ -473,7 +473,7 @@ readfile(char *arg, size_t x)
 
 	close(ifd);
 	printf("Read: %zu [%zu lines]\n", bytes, nl);
-	update((x + nl) ? x + nl : 1, endl + nl, 1);
+	update((x + nl) ? x + nl : 1, endl + nl, nl);
 	return ret;
 }
 
