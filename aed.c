@@ -911,10 +911,8 @@ main(int c, char **av)
 			goto err;
 	for (;;) {
 		com.x = -1, com.y = -1, com.c = 'p', *com.arg = 0;
-		// printf("%s", ASTYLE);
 		if (!fgets(in, sizeof(in) - 1, stdin))
 			goto err;
-		// printf("%s", ARESET);
 		in[strcspn(in, "\n")] = 0;
 		if (!strlen(in)) /* null command */
 			com.y = com.x = curl + 1;
