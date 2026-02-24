@@ -52,6 +52,8 @@ static int fd = -1;	    /* main temp file */
 static int ufd = -1;	    /* undo temp file */
 static time_t tstamp;	    /* for timestamp */
 static char tmpbuf[65535];  /* buffer for functions */
+static char prompt[4096];   /* current prompt for search */
+static size_t searchp = 1;  /* current line for search */
 
 inline static char *
 expr(char *s, unsigned long long *n, size_t cur, size_t end)
@@ -127,7 +129,7 @@ parse(char *s, size_t cur, size_t end, edcom *out)
 	char *sp = s, *endp;
 
 	while (!isalpha((uint8_t)*sp) && *sp != '!' && *sp != '\'' &&
-	    *sp != '=' && *sp)
+	    *sp != '=' && *sp != '/' && *sp)
 		sp++;
 	if (*sp) {
 		/* parse command */
@@ -392,6 +394,48 @@ print(size_t x, size_t y, bool number, bool list)
 		return 0;
 
 	update(y, endl, cflag);
+	return 1;
+}
+
+static bool
+search(char *nprompt)
+{
+	regmatch_t m;
+	size_t i = 0;
+	regex_t rx;
+	ssize_t n;
+	char *lp;
+
+	if (nprompt && *nprompt) {
+		snprintf(prompt, sizeof(prompt), "%s", nprompt);
+		n = strlen(prompt);
+		if (n > 1 && prompt[n - 1] == '/')
+			prompt[n - 1] = 0;
+		searchp = 1;
+	} else if (!*prompt)
+		return 0;
+	if (regcomp(&rx, prompt, REG_EXTENDED))
+		return 0;
+
+	lseek(fd, 0, SEEK_SET);
+	while ((n = GETLINERG(searchp, endl, &i, &lp, fd)) > 0) {
+		if (!regexec(&rx, lp, 1, &m, 0)) {
+			printf("%s%s%s", ASTYLE, lp, ARESET);
+			free(lp);
+			curl = i++;
+			if (i > endl)
+				goto ret;
+			searchp = i;
+			regfree(&rx);
+			return 1;
+		}
+		free(lp);
+	}
+
+ret:
+	regfree(&rx);
+	searchp = 1;
+	puts("EOF");
 	return 1;
 }
 
@@ -822,6 +866,8 @@ command(edcom *c)
 	case 's':
 		savefile();
 		return substitute(c->arg + 1, c->x, c->y);
+	case '/':
+		return search(c->arg);
 	case '!':
 		return callunix(c->arg);
 	case '\'':

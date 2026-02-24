@@ -23,4 +23,5 @@ u				undo
 ($)r [file]			read file
 ($)=				get number
 !command			shell escape
+/[RE][/]			search
 ```
