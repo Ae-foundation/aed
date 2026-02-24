@@ -53,7 +53,7 @@ static int ufd = -1;	    /* undo temp file */
 static time_t tstamp;	    /* for timestamp */
 static char tmpbuf[65535];  /* buffer for functions */
 static char prompt[4096];   /* current prompt for search */
-static size_t searchp = 1;  /* current line for search */
+static size_t searchp;	    /* current line for search */
 
 inline static char *
 expr(char *s, unsigned long long *n, size_t cur, size_t end)
