@@ -144,7 +144,7 @@ parse(char *s, size_t cur, size_t end, edcom *out)
 		out->y = end;
 		if (n > 1 && !aparse(++s, &out->y, cur, end, &endp))
 			return 0;
-	} else { /* [n], or [n]; or [n],[n] or [n];[n] */
+	} else { /* <n>, or <n>; or <n>,[n] or <n>;[n] */
 		if (!aparse(s, &out->x, cur, end, &endp))
 			return 0;
 		out->y = out->x;
